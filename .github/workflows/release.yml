@@ -3,9 +3,13 @@ name: Release
 # Publishes the three crates to crates.io in dependency order and creates a
 # GitHub release. Trigger by pushing a tag such as `v0.1.1`, or manually.
 #
-# Required repository secret:
-#   CARGO_REGISTRY_TOKEN — a crates.io API token with publish rights for
-#   `bmd-atem-atom`, `embassy-bmd-atem` and `embassy-bmd-atem-std`.
+# Authentication uses crates.io **Trusted Publishing**: no long-lived secret is
+# stored. Configure it once per crate under
+# https://crates.io/crates/<name>/settings/trusted-publishing with
+#   repository: MikanseiLaboratory/embassy-bmd-atem
+#   workflow:   release.yml
+# The workflow exchanges a GitHub OIDC token for a short-lived crates.io token
+# (rust-lang/crates-io-auth-action) which is revoked when the job ends.
 
 on:
   push:
@@ -19,6 +23,9 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+
+permissions:
+  contents: read
 
 jobs:
   verify:
@@ -60,7 +67,10 @@ jobs:
     name: Publish to crates.io
     needs: verify
     runs-on: ubuntu-latest
-    environment: crates-io
+    permissions:
+      # Required for trusted publishing: lets the job request a GitHub OIDC token.
+      id-token: write
+      contents: write
     steps:
       - uses: actions/checkout@v4
 
@@ -76,10 +86,16 @@ jobs:
           echo "version=$v" >> "$GITHUB_OUTPUT"
           echo "Publishing version $v"
 
+      # Trusted publishing: exchange the GitHub OIDC token for a short-lived
+      # crates.io token. Revoked automatically when the job ends.
+      - name: Authenticate with crates.io
+        id: auth
+        uses: rust-lang/crates-io-auth-action@v1
+
       - name: Publish bmd-atem-atom
-        run: cargo publish -p bmd-atem-atom --token "$CARGO_REGISTRY_TOKEN"
+        run: cargo publish -p bmd-atem-atom
         env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
 
       # crates.io needs a moment before the new crate is resolvable as a
       # dependency of the next one.
@@ -87,24 +103,24 @@ jobs:
         run: sleep 45
 
       - name: Publish embassy-bmd-atem
-        run: cargo publish -p embassy-bmd-atem --token "$CARGO_REGISTRY_TOKEN"
+        run: cargo publish -p embassy-bmd-atem
         env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
 
       - name: Wait for the index
         run: sleep 45
 
       - name: Publish embassy-bmd-atem-std
-        run: cargo publish -p embassy-bmd-atem-std --token "$CARGO_REGISTRY_TOKEN"
+        run: cargo publish -p embassy-bmd-atem-std
         env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
 
       - name: Create GitHub release
         uses: softprops/action-gh-release@v2
         with:
           generate_release_notes: true
           body: |
-            Published to crates.io:
+            Published to crates.io via trusted publishing:
 
             - [`bmd-atem-atom ${{ steps.version.outputs.version }}`](https://crates.io/crates/bmd-atem-atom)
             - [`embassy-bmd-atem ${{ steps.version.outputs.version }}`](https://crates.io/crates/embassy-bmd-atem)

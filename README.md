@@ -167,9 +167,28 @@ Module paths: `io`/`packet`/`session`/`udp` → `embassy_bmd_atem::udp::{io, pac
 
 ### Releasing
 
-Push a `v*` tag (or run *Release* manually). The workflow verifies everything,
-then publishes `bmd-atem-atom` → `embassy-bmd-atem` → `embassy-bmd-atem-std`
-and opens a GitHub release. It needs a `CARGO_REGISTRY_TOKEN` secret.
+Releases use crates.io **Trusted Publishing** — no long-lived token is stored
+in the repository.
+
+One-time setup, per crate on <https://crates.io/crates/>*name*/settings/trusted-publishing:
+
+| field | value |
+|---|---|
+| Repository | `MikanseiLaboratory/embassy-bmd-atem` |
+| Workflow file | `release.yml` |
+
+Apply it to `bmd-atem-atom`, `embassy-bmd-atem` and `embassy-bmd-atem-std`.
+The workflow then exchanges a GitHub OIDC token (`id-token: write`) for a
+short-lived crates.io token via `rust-lang/crates-io-auth-action`, publishes the
+three crates in dependency order and opens a GitHub release. The token is
+revoked automatically when the job ends.
+
+Cut a release by tagging `main`:
+
+```sh
+git tag v0.1.1 -m "v0.1.1"
+git push origin v0.1.1
+```
 
 ## License
 
