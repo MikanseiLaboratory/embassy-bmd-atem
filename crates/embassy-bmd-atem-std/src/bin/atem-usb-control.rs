@@ -24,7 +24,7 @@ use bmd_atem_atom::{
 };
 use clap::{Parser, ValueEnum};
 use embassy_bmd_atem::FrameError;
-use embassy_bmd_atem::usb::protocol::{DataLenLayout, StreamParser};
+use embassy_bmd_atem::usb::protocol::{DataLenLayout, StreamParser, build_flow_host};
 use embassy_bmd_atem::usb::session::{
     AtemUsbSession, SessionEvent, UsbSessionConfig, UsbSessionError, UsbSessionState,
 };
@@ -126,6 +126,15 @@ struct Cli {
     /// probing for the undocumented `0x05` packet).
     #[arg(long, value_name = "MS")]
     poll_05_ms: Option<u32>,
+    /// Send a small (1-block) `0x03` credit grant every N ms during the listen
+    /// phase, bypassing the idle-pause — probing the poll-for-updates model.
+    #[arg(long, value_name = "MS")]
+    poll_credit_ms: Option<u32>,
+    /// Send a `TiRq` (NOP/time-request) poll every N ms during the listen
+    /// phase, flushing a fresh credit grant first — the ASC/pyatem-style
+    /// state poll.
+    #[arg(long, value_name = "MS")]
+    poll_tirq_ms: Option<u32>,
     /// Receive credit in 1024 B blocks granted to the switcher (initial grant
     /// and per-chunk re-grant). Default 4 (live-verified).
     #[arg(long, default_value_t = 4, value_name = "N")]
@@ -293,17 +302,40 @@ async fn run_live_async(
         println!("sent tunnel [{spec}] -> {} bytes", raw.len());
     }
 
-    // Listen until the deadline or Ctrl-C, optionally polling with 0x05.
+    // Listen until the deadline or Ctrl-C, optionally polling with 0x05
+    // and/or periodic small credit grants.
     let deadline =
         (cli.listen_ms > 0).then(|| Instant::now() + Duration::from_millis(cli.listen_ms));
     let mut next_poll_05 = cli
         .poll_05_ms
         .map(|ms| Instant::now() + Duration::from_millis(u64::from(ms)))
         .unwrap_or(Instant::now());
+    let mut next_poll_credit = cli
+        .poll_credit_ms
+        .map(|ms| Instant::now() + Duration::from_millis(u64::from(ms)))
+        .unwrap_or(Instant::now());
+    let mut next_poll_tirq = cli
+        .poll_tirq_ms
+        .map(|ms| Instant::now() + Duration::from_millis(u64::from(ms)))
+        .unwrap_or(Instant::now());
     loop {
         let timer = async {
             if let Some(d) = deadline {
                 tokio::time::sleep_until(tokio::time::Instant::from_std(d)).await;
+            } else {
+                std::future::pending::<()>().await;
+            }
+        };
+        let credit_timer = async {
+            if cli.poll_credit_ms.is_some() {
+                tokio::time::sleep_until(tokio::time::Instant::from_std(next_poll_credit)).await;
+            } else {
+                std::future::pending::<()>().await;
+            }
+        };
+        let tirq_timer = async {
+            if cli.poll_tirq_ms.is_some() {
+                tokio::time::sleep_until(tokio::time::Instant::from_std(next_poll_tirq)).await;
             } else {
                 std::future::pending::<()>().await;
             }
@@ -317,6 +349,22 @@ async fn run_live_async(
                 }
             }
             _ = timer => break,
+            _ = tirq_timer, if cli.poll_tirq_ms.is_some() => {
+                match session.poll_ping(now()).await {
+                    Ok(()) => println!("poll: TiRq sent (+credit)"),
+                    Err(e) => println!("poll: TiRq failed ({e}) — continuing"),
+                }
+                next_poll_tirq += Duration::from_millis(u64::from(cli.poll_tirq_ms.unwrap_or(500)));
+            }
+            _ = credit_timer, if cli.poll_credit_ms.is_some() => {
+                // Grant one fresh block regardless of the idle-pause: probes
+                // whether queued state (e.g. button events) flushes on grant.
+                match session.write_raw(&build_flow_host(1), now()).await {
+                    Ok(()) => println!("poll: granted 1 credit block"),
+                    Err(e) => println!("poll: credit write failed ({e}) — continuing"),
+                }
+                next_poll_credit += Duration::from_millis(u64::from(cli.poll_credit_ms.unwrap_or(3000)));
+            }
             _ = tokio::time::sleep_until(tokio::time::Instant::from_std(next_poll_05)), if cli.poll_05_ms.is_some() => {
                 match session.write_raw(&[0x00, 0x05, 0x00, 0x01], now()).await {
                     Ok(()) => println!("poll: sent 0x05"),

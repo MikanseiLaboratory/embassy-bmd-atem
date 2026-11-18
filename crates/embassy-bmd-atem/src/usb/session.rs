@@ -312,6 +312,37 @@ impl<H: UsbBulkHost> AtemUsbSession<H> {
         Ok(())
     }
 
+    /// Poll the switcher with a `TiRq` (time-request / NOP) command — pyatem's
+    /// read-only "are you there" probe. A fresh credit grant is flushed first
+    /// so the queued `Time`/state response can come back.
+    ///
+    /// # Errors
+    /// [`UsbSessionError::NotConnected`] before the handshake, backend failures.
+    pub async fn poll_ping(&mut self, now_ms: u32) -> Result<(), UsbSessionError<H::Error>> {
+        if !matches!(self.state, UsbSessionState::Acked | UsbSessionState::Running) {
+            return Err(UsbSessionError::NotConnected);
+        }
+        // `TiRq` atom: u16 len (8), u16 pad, FourCC, no payload.
+        const TIRQ: [u8; 8] = [0x00, 0x08, 0x00, 0x00, b'T', b'i', b'R', b'q'];
+        self.write_atoms(&TIRQ, now_ms).await
+    }
+
+    /// Grant receive credit and wait for whatever is queued to flush.
+    async fn write_atoms(
+        &mut self,
+        atoms: &[u8],
+        now_ms: u32,
+    ) -> Result<(), UsbSessionError<H::Error>> {
+        self.send_atoms(atoms, now_ms).await?;
+        let blocks = self.config.auto_credit_blocks.unwrap_or(1);
+        self.host
+            .write_bulk(&crate::usb::protocol::build_flow_host(blocks))
+            .await
+            .map_err(UsbSessionError::Backend)?;
+        self.last_tx_ms = now_ms;
+        Ok(())
+    }
+
     /// Report our RX backlog (`bytes` not yet consumed by the application) to the
     /// switcher. Returns `Ok(true)` when a `0x03` frame was written (only announced
     /// for **increasing** block counts, matching pyatem).
