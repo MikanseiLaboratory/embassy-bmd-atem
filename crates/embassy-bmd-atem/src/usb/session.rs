@@ -60,8 +60,8 @@ impl Default for UsbSessionConfig {
             keepalive_ms: 510,
             max_atoms_len: 0x4000,
             read_chunk: 2048,
-            initial_flow_blocks: Some(4),
-            auto_credit_blocks: Some(4),
+            initial_flow_blocks: Some(1),
+            auto_credit_blocks: Some(1),
             data_len_layout: DataLenLayout::LeAtStart,
         }
     }

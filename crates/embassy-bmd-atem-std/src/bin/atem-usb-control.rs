@@ -136,8 +136,8 @@ struct Cli {
     #[arg(long, value_name = "MS")]
     poll_tirq_ms: Option<u32>,
     /// Receive credit in 1024 B blocks granted to the switcher (initial grant
-    /// and per-chunk re-grant). Default 4 (live-verified).
-    #[arg(long, default_value_t = 4, value_name = "N")]
+    /// and per-chunk re-grant). Default 1, matching pyatem's `min(1, …)`.
+    #[arg(long, default_value_t = 1, value_name = "N")]
     credit: u16,
 }
 
