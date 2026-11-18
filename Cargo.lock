@@ -93,7 +93,7 @@ checksum = "3ded4057c258ba199e2d26386d3af3780957ecaee6c4ef4041c6b4b8b97c0b06"
 
 [[package]]
 name = "bmd-atem-atom"
-version = "0.1.1"
+version = "0.1.2"
 
 [[package]]
 name = "bumpalo"
@@ -312,7 +312,7 @@ checksum = "0e9c71c2167ca323c882b99918929403426e2373ea17242ff5653e0d5e1058be"
 
 [[package]]
 name = "embassy-bmd-atem"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "bmd-atem-atom",
  "clap",
@@ -323,7 +323,7 @@ dependencies = [
 
 [[package]]
 name = "embassy-bmd-atem-std"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "bmd-atem-atom",
  "clap",
@@ -868,7 +868,7 @@ dependencies = [
 
 [[package]]
 name = "rp2040-usb-atem"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "bmd-atem-atom",
  "cortex-m",
