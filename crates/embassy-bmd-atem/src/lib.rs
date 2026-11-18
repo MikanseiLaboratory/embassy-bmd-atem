@@ -36,7 +36,7 @@ pub use link::{FrameContext, FramePlan, TransportKind, frame_command};
 
 pub use udp::{
     ATEM_UDP_PORT, AtemControl, AtemPacket, AtemPacketFlags, AtemPacketPayload, AtemSession,
-    EdgeNalUdp, MockUdp, MockUdpExhausted, PendingPacket, SessionConfig, SessionError,
+    EdgeNalUdp, ErrorType, MockUdp, MockUdpExhausted, PendingPacket, SessionConfig, SessionError,
     SessionState, UdpReceive, UdpReceiveBounded, UdpSend,
 };
 

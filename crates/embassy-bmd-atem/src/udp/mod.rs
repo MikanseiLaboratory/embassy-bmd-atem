@@ -20,7 +20,7 @@ pub mod session;
 /// Default UDP control port of ATEM switchers.
 pub const ATEM_UDP_PORT: u16 = 9910;
 
-pub use io::{UdpReceive, UdpReceiveBounded, UdpSend};
+pub use io::{ErrorType, UdpReceive, UdpReceiveBounded, UdpSend};
 pub use mock::{EdgeNalUdp, MockUdp, MockUdpExhausted};
 pub use packet::{AtemControl, AtemPacket, AtemPacketFlags, AtemPacketPayload};
 pub use session::{AtemSession, PendingPacket, SessionConfig, SessionError, SessionState};
