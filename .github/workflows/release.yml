@@ -1,7 +1,7 @@
 name: Release
 
 # Publishes the three crates to crates.io in dependency order and creates a
-# GitHub release. Trigger by pushing a tag such as `v0.1.1`, or manually.
+# GitHub release. Trigger by pushing a tag such as `v0.1.2`, or manually.
 #
 # Authentication uses crates.io **Trusted Publishing**: no long-lived secret is
 # stored. Configure it once per crate under
@@ -62,6 +62,16 @@ jobs:
         run: cargo doc --no-deps -p bmd-atem-atom -p embassy-bmd-atem -p embassy-bmd-atem-std --features embassy-bmd-atem/std
         env:
           RUSTDOCFLAGS: -D warnings
+
+      # Never publish a crate whose README would be missing on crates.io.
+      - name: README is packaged for crates.io
+        run: |
+          for p in bmd-atem-atom embassy-bmd-atem embassy-bmd-atem-std; do
+            if ! cargo package -p "$p" --list | grep -qx 'README.md'; then
+              echo "::error::$p: README.md is missing from the package; crates.io will show no README"
+              exit 1
+            fi
+          done
 
   publish:
     name: Publish to crates.io

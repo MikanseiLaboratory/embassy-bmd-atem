@@ -57,3 +57,14 @@ jobs:
         run: |
           cargo build -p embassy-bmd-atem --features std --examples
           cargo build -p embassy-bmd-atem-std
+
+      # crates.io renders the README straight out of the uploaded .crate, so a
+      # package without README.md shows up as "no README" on the crate page.
+      - name: README is packaged for crates.io
+        run: |
+          for p in bmd-atem-atom embassy-bmd-atem embassy-bmd-atem-std; do
+            if ! cargo package -p "$p" --list | grep -qx 'README.md'; then
+              echo "::error::$p: README.md is missing from the package; crates.io will show no README"
+              exit 1
+            fi
+          done

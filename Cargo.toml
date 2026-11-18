@@ -8,15 +8,19 @@ members = [
 ]
 
 [workspace.package]
-version = "0.1.1"
+version = "0.1.2"
 edition = "2024"
 rust-version = "1.85"
 license = "Apache-2.0"
 repository = "https://github.com/MikanseiLaboratory/embassy-bmd-atem"
+# One canonical README lives at the workspace root. Cargo copies it into each
+# package root when packaging, so every .crate ships a README.md that crates.io
+# can render.
+readme = "README.md"
 
 [workspace.dependencies]
-bmd-atem-atom = { path = "crates/bmd-atem-atom", version = "0.1.1" }
-embassy-bmd-atem = { path = "crates/embassy-bmd-atem", version = "0.1.1" }
+bmd-atem-atom = { path = "crates/bmd-atem-atom", version = "0.1.2" }
+embassy-bmd-atem = { path = "crates/embassy-bmd-atem", version = "0.1.2" }
 embedded-io-async = { version = "0.7", default-features = false }
 defmt = { version = "1", default-features = false }
 nusb = { version = "0.2.9", features = ["tokio"] }

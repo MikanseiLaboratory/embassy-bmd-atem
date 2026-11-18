@@ -3,22 +3,31 @@
 [![CI](https://github.com/MikanseiLaboratory/embassy-bmd-atem/actions/workflows/ci.yml/badge.svg)](https://github.com/MikanseiLaboratory/embassy-bmd-atem/actions/workflows/ci.yml)
 [![crates.io](https://img.shields.io/crates/v/embassy-bmd-atem.svg)](https://crates.io/crates/embassy-bmd-atem)
 
+_This is the README shared by every crate in the workspace, so crates.io shows
+the same page for `bmd-atem-atom`, `embassy-bmd-atem` and
+`embassy-bmd-atem-std`._
+
 Blackmagic Design ATEM switcher control protocol for embedded Rust and std,
 in one workspace:
 
 - **`bmd-atem-atom`** — transport-independent atom (command record) codec
-  ([crates.io](https://crates.io/crates/bmd-atem-atom)).
-- **`embassy-bmd-atem`** — `no_std` protocol core with two transports:
+  ([crates.io](https://crates.io/crates/bmd-atem-atom),
+  [docs.rs](https://docs.rs/bmd-atem-atom)).
+- **`embassy-bmd-atem`** — `no_std` protocol core with two transports
+  ([crates.io](https://crates.io/crates/embassy-bmd-atem),
+  [docs.rs](https://docs.rs/embassy-bmd-atem)):
   - `udp` — the LAN **BURP** protocol (port 9910): 12-byte packet header,
     connect handshake, cumulative-ACK queue, retransmission helpers, and
     `edge-nal`-style async UDP traits (continuation of the archived
     [edge-bmd-atem](https://github.com/MikanseiLaboratory/edge-bmd-atem)).
   - `usb` — the **USB-C "8.6+" control link, host side**: plug your
     microcontroller (or PC) into the switcher's USB port and speak the tunnel
-    protocol. See [`docs/PROTOCOL_USB.md`](docs/PROTOCOL_USB.md).
+    protocol. See
+    [`docs/PROTOCOL_USB.md`](https://github.com/MikanseiLaboratory/embassy-bmd-atem/blob/main/docs/PROTOCOL_USB.md).
 - **`embassy-bmd-atem-std`** — Tokio + [nusb](https://crates.io/crates/nusb)
   desktop backend and the `atem-usb-control` CLI
-  ([crates.io](https://crates.io/crates/embassy-bmd-atem-std)).
+  ([crates.io](https://crates.io/crates/embassy-bmd-atem-std),
+  [docs.rs](https://docs.rs/embassy-bmd-atem-std)).
 - **`examples/rp2040-usb-atem`** — RP2040 example wiring the USB host session
   (transport transport integration lands with real hardware bring-up).
 
@@ -112,7 +121,8 @@ loop {
 session.send_atoms(&cmd_atoms, now_ms()).await?;
 ```
 
-The USB session only needs a [`UsbBulkHost`](crates/embassy-bmd-atem/src/usb/io.rs)
+The USB session only needs a
+[`UsbBulkHost`](https://github.com/MikanseiLaboratory/embassy-bmd-atem/blob/main/crates/embassy-bmd-atem/src/usb/io.rs)
 implementation (async bulk read/write + clear-halt + delay). The desktop
 implementation lives in `embassy-bmd-atem-std` (`nusb`); embedded backends
 (e.g. `cotton-usb-host` on RP2040) wrap the same trait.
@@ -126,7 +136,7 @@ implementation lives in `embassy-bmd-atem-std` (`nusb`); embedded backends
       chunks), command round-trips (`DCut` → `PrgI`/`TPrvI` responses),
       bulk-IN stall = idle-signal recovery, and the undocumented
       `0x05` → `0x06` heartbeat pair (see
-      [`docs/PROTOCOL_USB.md`](docs/PROTOCOL_USB.md))
+      [`docs/PROTOCOL_USB.md`](https://github.com/MikanseiLaboratory/embassy-bmd-atem/blob/main/docs/PROTOCOL_USB.md))
 - [x] Cross-checked against `pyatem` on the same switcher with Linux `usbmon`:
       ZLP keepalive at ~510 ms and a 1-block flow window are the reference
       client's behaviour and are now this crate's defaults
@@ -141,7 +151,7 @@ implementation lives in `embassy-bmd-atem-std` (`nusb`); embedded backends
       (needs a powered USB-C OTG hub so the switcher sees VBUS)
 - [ ] `0x05` heartbeat cadence, and whether spontaneous switcher events
       need a poll (open questions in
-      [`docs/PROTOCOL_USB.md`](docs/PROTOCOL_USB.md#open-questions))
+      [`docs/PROTOCOL_USB.md`](https://github.com/MikanseiLaboratory/embassy-bmd-atem/blob/main/docs/PROTOCOL_USB.md#open-questions))
 
 ### Migrating from `edge-bmd-atem`
 
@@ -186,12 +196,19 @@ revoked automatically when the job ends.
 Cut a release by tagging `main`:
 
 ```sh
-git tag v0.1.1 -m "v0.1.1"
-git push origin v0.1.1
+git tag v0.1.2 -m "v0.1.2"
+git push origin v0.1.2
 ```
+
+Each manifest sets `readme.workspace = true`, so Cargo copies the root
+`README.md` into every package and the published `.crate` always contains it
+(this is what crates.io renders). Verify with `cargo package -p <crate> --list`
+before tagging; CI and the release workflow also fail if `README.md` is missing
+from a package.
 
 ## License
 
 Apache-2.0. Protocol facts were derived from the OpenSwitcher/pyatem
 (LGPL-3.0) documentation and necromancer (Apache-2.0); no source code was
-copied — see [`NOTICE`](NOTICE).
+copied — see
+[`NOTICE`](https://github.com/MikanseiLaboratory/embassy-bmd-atem/blob/main/NOTICE).
