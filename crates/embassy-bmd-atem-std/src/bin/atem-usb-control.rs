@@ -18,16 +18,16 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use bmd_atem_atom::{
-    encode_atom_change_preview_input, encode_atom_change_program_input,
-    encode_atom_change_transition_next, encode_atom_do_ftb_auto, encode_atom_do_ftb_cut,
-    encode_atom_do_transition_auto, encode_atom_do_transition_cut, AtomIter, NextTransitionStyle,
+    AtomIter, NextTransitionStyle, encode_atom_change_preview_input,
+    encode_atom_change_program_input, encode_atom_change_transition_next, encode_atom_do_ftb_auto,
+    encode_atom_do_ftb_cut, encode_atom_do_transition_auto, encode_atom_do_transition_cut,
 };
 use clap::{Parser, ValueEnum};
+use embassy_bmd_atem::FrameError;
 use embassy_bmd_atem::usb::protocol::{DataLenLayout, StreamParser};
 use embassy_bmd_atem::usb::session::{
     AtemUsbSession, SessionEvent, UsbSessionConfig, UsbSessionError, UsbSessionState,
 };
-use embassy_bmd_atem::FrameError;
 use embassy_bmd_atem_std as backend;
 
 /// Decode of the device → host `0x04` length field.
@@ -93,6 +93,10 @@ struct Cli {
     /// Record received atom blocks (hex, one per line) to this file.
     #[arg(long, value_name = "FILE")]
     dump: Option<PathBuf>,
+    /// Record every raw bulk transfer (`>` host→device / `<` device→host, hex
+    /// per line) to this file for protocol analysis.
+    #[arg(long, value_name = "FILE")]
+    raw_dump: Option<PathBuf>,
     /// Parse a recorded hex replay instead of talking to a live device.
     #[arg(long, value_name = "FILE")]
     replay: Option<PathBuf>,
@@ -102,6 +106,26 @@ struct Cli {
     /// Log raw bytes and full atom details.
     #[arg(long)]
     verbose: bool,
+    /// Skip the host → device 0x03 receive-credit grant (protocol probing:
+    /// the switcher will not start the initial dump).
+    #[arg(long)]
+    no_flow: bool,
+    /// Disable the automatic 0x03 credit re-grant after each consumed chunk
+    /// (protocol probing: the dump stops after the initially granted blocks).
+    #[arg(long)]
+    no_credit: bool,
+    /// Send bare zero-length keepalive packets every N ms. **Stalls on real
+    /// hardware** — probing only.
+    #[arg(long, value_name = "MS")]
+    keepalive_ms: Option<u32>,
+    /// Send a raw tunnel frame (hex, e.g. `00050001` for the undocumented
+    /// host → device `0x05` packet) after connecting; probing only.
+    #[arg(long = "tunnel", value_name = "HEX")]
+    tunnels: Vec<String>,
+    /// Send `00 05 00 01` every N ms during the listen phase (heartbeat
+    /// probing for the undocumented `0x05` packet).
+    #[arg(long, value_name = "MS")]
+    poll_05_ms: Option<u32>,
 }
 
 fn main() {
@@ -186,12 +210,22 @@ async fn run_live_async(
     let host = backend::open_device(device_info, cli.iface, cli.out_ep, cli.in_ep)
         .await
         .map_err(|e| e.to_string())?;
+    let mut host = host;
+    if let Some(path) = cli.raw_dump.as_deref() {
+        match std::fs::File::create(path) {
+            Ok(f) => host.set_raw_log(Some(f)),
+            Err(e) => eprintln!("warning: cannot open raw dump file {}: {e}", path.display()),
+        }
+    }
     let (out_ep, in_ep) = host.endpoints();
     println!("control link ready (iface claimed, bulk OUT 0x{out_ep:02x} / IN 0x{in_ep:02x})");
 
     let config = UsbSessionConfig {
         data_len_layout: layout,
         max_atoms_len: max_atoms_len.min(u16::MAX as usize & 0xFFFF) as u16,
+        initial_flow_blocks: if cli.no_flow { None } else { Some(4) },
+        auto_credit_blocks: if cli.no_credit { None } else { Some(4) },
+        keepalive_ms: cli.keepalive_ms.unwrap_or(u32::MAX),
         ..UsbSessionConfig::default()
     };
     let mut session = AtemUsbSession::new(host, config);
@@ -243,9 +277,20 @@ async fn run_live_async(
         }
     }
 
-    // Listen until the deadline or Ctrl-C.
+    // Send raw tunnel probing frames (e.g. the undocumented 0x05).
+    for (index, spec) in cli.tunnels.iter().enumerate() {
+        let raw = parse_send_hex(spec).map_err(|e| format!("--tunnel #{index}: {e}"))?;
+        session.write_raw(&raw, now()).await.map_err(|e| format!("tunnel {spec}: {e}"))?;
+        println!("sent tunnel [{spec}] -> {} bytes", raw.len());
+    }
+
+    // Listen until the deadline or Ctrl-C, optionally polling with 0x05.
     let deadline =
         (cli.listen_ms > 0).then(|| Instant::now() + Duration::from_millis(cli.listen_ms));
+    let mut next_poll_05 = cli
+        .poll_05_ms
+        .map(|ms| Instant::now() + Duration::from_millis(u64::from(ms)))
+        .unwrap_or(Instant::now());
     loop {
         let timer = async {
             if let Some(d) = deadline {
@@ -259,6 +304,14 @@ async fn run_live_async(
                 handle_poll(r, &mut printer)?;
             }
             _ = timer => break,
+            _ = tokio::time::sleep_until(tokio::time::Instant::from_std(next_poll_05)), if cli.poll_05_ms.is_some() => {
+                session
+                    .write_raw(&[0x00, 0x05, 0x00, 0x01], now())
+                    .await
+                    .map_err(|e| format!("poll 0x05: {e}"))?;
+                println!("poll: sent 0x05");
+                next_poll_05 += Duration::from_millis(u64::from(cli.poll_05_ms.unwrap_or(1000)));
+            }
             _ = &mut ctrl_c => { println!("interrupted"); break; }
         }
     }

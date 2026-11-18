@@ -1,23 +1,42 @@
 [package]
 name = "rp2040-usb-atem"
-description = "RP2040 (Pico) example: ATEM USB 8.6+ host control"
+description = "RP2040 example: ATEM USB 8.6+ host control (cotton-usb-host)"
 version.workspace = true
-edition.workspace = true
+edition = "2021"
 license.workspace = true
 repository.workspace = true
 publish = false
 
+# Edition 2021 for now: RTIC 2.1's generated code predates the
+# unsafe_op_in_unsafe_fn defaults of edition 2024.
+
 [dependencies]
-embassy-bmd-atem = { workspace = true }
+embassy-bmd-atem = { workspace = true, features = ["defmt"] }
 bmd-atem-atom = { workspace = true }
-cortex-m = { version = "0.7", features = ["critical-section-single-core"] }
+cotton-usb-host = { version = "0.3.0", default-features = false, features = ["rp2040"] }
+cortex-m = "0.7.7"
 cortex-m-rt = "0.7"
+defmt = "1"
+defmt-rtt = "1"
+panic-probe = { version = "1", features = ["print-defmt"] }
+futures-util = { version = "0.3", default-features = false }
+rtic = { version = "2.1", features = ["thumbv6-backend"] }
+rtic-monotonics = { version = "2.0.2", features = ["rp2040"] }
+static_cell = "2"
+# thumbv6m has no atomic CAS: provide it via critical-section, matching the
+# cotton examples (required by static_cell / rtic on this target).
+portable-atomic = { version = "1", features = ["critical-section"] }
+rp-pico = "0.9"
+rp2040-hal = { version = "0.10", features = ["rt", "critical-section-impl"] }
 critical-section = "1"
 linked_list_allocator = { version = "0.10.6", default-features = false }
 
+# NB: pinned to rp2040-hal 0.10 / rp2040-pac 0.6 on purpose — cotton-usb-host's
+# `rp2040` feature is built against pac 0.6 register types.
+
 [features]
 default = []
-# Gate for the actual firmware bin; build with --target thumbv6m-none-eabi.
+# Gate for the firmware bin; build with --target thumbv6m-none-eabi.
 firmware = []
 
 [[bin]]

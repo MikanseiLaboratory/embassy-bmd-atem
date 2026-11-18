@@ -24,9 +24,9 @@ pub mod session;
 
 pub use io::UsbBulkHost;
 pub use protocol::{
-    build_data_host, build_flow_host, build_init, DataLenLayout, FrameError, ParsedDeviceFrame,
-    StreamParser, PKT_TYPE_DATA, PKT_TYPE_FLOW, PKT_TYPE_HOST_MISC, PKT_TYPE_INIT,
-    PKT_TYPE_INIT_ACK,
+    DataLenLayout, FrameError, PKT_TYPE_DATA, PKT_TYPE_FLOW, PKT_TYPE_HOST_MISC, PKT_TYPE_INIT,
+    PKT_TYPE_INIT_ACK, ParsedDeviceFrame, StreamParser, build_data_host, build_flow_host,
+    build_init,
 };
 pub use session::{
     AtemUsbSession, SessionEvent, UsbSessionConfig, UsbSessionError, UsbSessionState,

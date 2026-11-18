@@ -25,20 +25,21 @@ pub mod udp;
 pub mod usb;
 
 pub use bmd_atem_atom::{
-    encode_atom_change_preview_input, encode_atom_change_program_input,
-    encode_atom_change_transition_next, encode_atom_do_ftb_auto, encode_atom_do_ftb_cut,
-    encode_atom_do_transition_auto, encode_atom_do_transition_cut, parse_atoms, AtomIter, FourCc,
-    NextTransitionStyle, RawAtom, RawAtomSlice,
+    AtomIter, FourCc, NextTransitionStyle, RawAtom, RawAtomSlice, encode_atom_change_preview_input,
+    encode_atom_change_program_input, encode_atom_change_transition_next, encode_atom_do_ftb_auto,
+    encode_atom_do_ftb_cut, encode_atom_do_transition_auto, encode_atom_do_transition_cut,
+    parse_atoms,
 };
 pub use error::Error;
 
 pub use udp::{
-    AtemControl, AtemPacket, AtemPacketFlags, AtemPacketPayload, AtemSession, EdgeNalUdp, MockUdp,
-    MockUdpExhausted, PendingPacket, SessionConfig, SessionError, SessionState, UdpReceive,
-    UdpReceiveBounded, UdpSend, ATEM_UDP_PORT,
+    ATEM_UDP_PORT, AtemControl, AtemPacket, AtemPacketFlags, AtemPacketPayload, AtemSession,
+    EdgeNalUdp, MockUdp, MockUdpExhausted, PendingPacket, SessionConfig, SessionError,
+    SessionState, UdpReceive, UdpReceiveBounded, UdpSend,
 };
 
 pub use usb::{
-    build_data_host, build_flow_host, build_init, AtemUsbSession, DataLenLayout, FrameError,
-    SessionEvent, StreamParser, UsbBulkHost, UsbSessionConfig, UsbSessionError, UsbSessionState,
+    AtemUsbSession, DataLenLayout, FrameError, SessionEvent, StreamParser, UsbBulkHost,
+    UsbSessionConfig, UsbSessionError, UsbSessionState, build_data_host, build_flow_host,
+    build_init,
 };

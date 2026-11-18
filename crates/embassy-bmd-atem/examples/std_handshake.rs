@@ -23,7 +23,7 @@ use std::time::Duration;
 use clap::Parser;
 use embassy_bmd_atem::udp::io::{ErrorType, UdpReceive, UdpReceiveBounded, UdpSend};
 use embassy_bmd_atem::{
-    AtemControl, AtemPacket, AtemPacketPayload, AtemSession, SessionConfig, ATEM_UDP_PORT,
+    ATEM_UDP_PORT, AtemControl, AtemPacket, AtemPacketPayload, AtemSession, SessionConfig,
 };
 use tokio::net::UdpSocket;
 

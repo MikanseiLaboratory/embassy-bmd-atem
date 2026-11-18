@@ -9,7 +9,8 @@ members = [
 
 [workspace.package]
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
+rust-version = "1.85"
 license = "Apache-2.0"
 repository = "https://github.com/MikanseiLaboratory/embassy-bmd-atem"
 
@@ -19,7 +20,7 @@ embassy-bmd-atem = { path = "crates/embassy-bmd-atem", version = "0.1.0" }
 embedded-io-async = { version = "0.7", default-features = false }
 defmt = { version = "1", default-features = false }
 nusb = { version = "0.2.9", features = ["tokio"] }
-tokio = { version = "1.47", default-features = false }
+tokio = { version = "1", default-features = false }
 clap = { version = "4.5", features = ["derive"] }
 
 [workspace.lints.rust]

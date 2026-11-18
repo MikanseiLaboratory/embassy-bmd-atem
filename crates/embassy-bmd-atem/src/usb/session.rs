@@ -1,18 +1,25 @@
 //! Controller-side session FSM over [`UsbBulkHost`].
 //!
-//! Mirrors pyatem's `UsbProtocol` controller flow: send the `0x01` init packet, wait
-//! for the `0x02` acknowledgement, consume the switcher-pushed initial state dump as
-//! `0x04`-announced atoms blobs, pace command writes (~4 ms per USB payload per
-//! pyatem), send zero-length keepalives when idle and report our RX backlog with
-//! `0x03` frames. Timeouts are the caller's concern (wrap the futures in your
-//! runtime's `timeout`/`select`).
+//! Mirrors the live-verified ATEM USB 8.6+ flow (see `docs/PROTOCOL_USB.md`):
+//! send the `0x01` init packet, wait for the `0x02` acknowledgement, then grant
+//! the switcher receive credit with a `0x03` frame (blocks of 1024 B). The
+//! switcher streams its initial state dump as `0x04`-announced chunks of a
+//! **continuous atom stream** (records straddle chunk boundaries); every
+//! consumed chunk is re-credited so the dump keeps flowing. Commands are sent
+//! with [`AtemUsbSession::send_atoms`] paced ~4 ms per USB payload. Timeouts
+//! are the caller's concern (wrap the futures in your runtime's
+//! `timeout`/`select`).
+//!
+//! Bare zero-length OUT packets **stall** on real hardware, so the keepalive is
+//! disabled by default; the tolerated `0x05` packet is the suspected
+//! Software-Control idle frame (open question).
 
 use alloc::vec::Vec;
 
 use crate::usb::io::UsbBulkHost;
 use crate::usb::protocol::{
-    build_data_host, build_flow_host, build_init, DataLenLayout, FrameError, ParsedDeviceFrame,
-    StreamParser,
+    DataLenLayout, FrameError, ParsedDeviceFrame, StreamParser, build_data_host, build_flow_host,
+    build_init,
 };
 
 /// Tunables for the USB 8.6+ controller session.
@@ -21,17 +28,23 @@ pub struct UsbSessionConfig {
     /// Delay after the `0x04` header write and after the atoms write, in ms
     /// (pyatem waits 4 ms around every USB send).
     pub send_pace_ms: u32,
-    /// Idle interval for host-initiated zero-length keepalive packets, in ms
-    /// (pyatem polls with 0.2–0.5 s).
+    /// Idle interval for host-initiated zero-length keepalive packets, in ms.
+    /// **Off by default**: bare ZLP writes stall the OUT endpoint on real
+    /// hardware (live-verified 2026-11). Set to a small value only for probing.
     pub keepalive_ms: u32,
-    /// Upper bound of a device-announced atoms blob, in bytes. Larger announcements
+    /// Upper bound of a device-announced chunk, in bytes. Larger announcements
     /// are a protocol error and resynchronise the stream.
     pub max_atoms_len: u16,
     /// Size of the backend read scratchpad (largest expected bulk IN transfer).
     pub read_chunk: usize,
-    /// Blocks (× 1024 B) announced to the switcher once after the `0x02` ack
-    /// (pyatem announces ≈ 0x1000 B = 4 blocks).
+    /// Blocks (× 1024 B) of receive credit granted to the switcher once after
+    /// the `0x02` ack. Live-verified: the switcher sends exactly this much of
+    /// the initial dump before waiting for more credit. `None` skips the grant
+    /// (the switcher then never starts the dump).
     pub initial_flow_blocks: Option<u16>,
+    /// Blocks (× 1024 B) of receive credit re-granted after every consumed
+    /// chunk, keeping the dump flowing. `None` disables auto-credit.
+    pub auto_credit_blocks: Option<u16>,
     /// How the device → host `0x04` length field is encoded.
     pub data_len_layout: DataLenLayout,
 }
@@ -40,10 +53,11 @@ impl Default for UsbSessionConfig {
     fn default() -> Self {
         Self {
             send_pace_ms: 4,
-            keepalive_ms: 500,
+            keepalive_ms: u32::MAX,
             max_atoms_len: 0x4000,
             read_chunk: 2048,
             initial_flow_blocks: Some(4),
+            auto_credit_blocks: Some(4),
             data_len_layout: DataLenLayout::LeAtStart,
         }
     }
@@ -118,6 +132,8 @@ pub struct AtemUsbSession<H: UsbBulkHost> {
     said_first_atoms: bool,
     last_tx_ms: u32,
     pending_flow_announce: Option<u16>,
+    /// Credit re-grant scheduled by the last consumed chunk.
+    pending_credit: Option<u16>,
     announced_blocks: u16,
 }
 
@@ -144,6 +160,7 @@ impl<H: UsbBulkHost> AtemUsbSession<H> {
             said_first_atoms: false,
             last_tx_ms: 0,
             pending_flow_announce: None,
+            pending_credit: None,
             announced_blocks: 0,
         }
     }
@@ -172,6 +189,7 @@ impl<H: UsbBulkHost> AtemUsbSession<H> {
         self.state = UsbSessionState::InitSent;
         self.said_first_atoms = false;
         self.pending_flow_announce = None;
+        self.pending_credit = None;
         self.announced_blocks = 0;
         self.last_tx_ms = now_ms;
         Ok(())
@@ -184,6 +202,7 @@ impl<H: UsbBulkHost> AtemUsbSession<H> {
         self.state = UsbSessionState::New;
         self.said_first_atoms = false;
         self.pending_flow_announce = None;
+        self.pending_credit = None;
         self.announced_blocks = 0;
     }
 
@@ -204,14 +223,21 @@ impl<H: UsbBulkHost> AtemUsbSession<H> {
         if self.state == UsbSessionState::New {
             return Err(UsbSessionError::NotConnected);
         }
-        if let Some(blocks) = self.pending_flow_announce.take() {
+        // Flush pending credit first, then the initial grant, then keepalives.
+        let announce = self.pending_credit.take().or_else(|| {
+            matches!(self.state, UsbSessionState::Acked | UsbSessionState::Running)
+                .then(|| self.pending_flow_announce.take())
+                .flatten()
+        });
+        if let Some(blocks) = announce {
             self.host
                 .write_bulk(&build_flow_host(blocks))
                 .await
                 .map_err(UsbSessionError::Backend)?;
             self.announced_blocks = self.announced_blocks.max(blocks);
             self.last_tx_ms = now_ms;
-        } else if matches!(self.state, UsbSessionState::Acked | UsbSessionState::Running)
+        } else if self.config.keepalive_ms != u32::MAX
+            && matches!(self.state, UsbSessionState::Acked | UsbSessionState::Running)
             && self.parser.is_idle()
             && now_ms.wrapping_sub(self.last_tx_ms) >= self.config.keepalive_ms
         {
@@ -260,6 +286,21 @@ impl<H: UsbBulkHost> AtemUsbSession<H> {
         Ok(())
     }
 
+    /// Send a raw tunnel frame bypassing the session's framing (protocol
+    /// probing: e.g. the undocumented `0x05` host → device packet).
+    ///
+    /// # Errors
+    /// Backend failures only.
+    pub async fn write_raw(
+        &mut self,
+        bytes: &[u8],
+        now_ms: u32,
+    ) -> Result<(), UsbSessionError<H::Error>> {
+        self.host.write_bulk(bytes).await.map_err(UsbSessionError::Backend)?;
+        self.last_tx_ms = now_ms;
+        Ok(())
+    }
+
     /// Report our RX backlog (`bytes` not yet consumed by the application) to the
     /// switcher. Returns `Ok(true)` when a `0x03` frame was written (only announced
     /// for **increasing** block counts, matching pyatem).
@@ -289,7 +330,14 @@ impl<H: UsbBulkHost> AtemUsbSession<H> {
     }
 
     fn take_ready_frame(&mut self, buf: &mut [u8]) -> Result<Option<ReadyFrame>, FrameError> {
-        match self.parser.try_next(buf)? {
+        let parsed = self.parser.try_next(buf)?;
+        // Any consumed chunk (even one that completed no atom) earns the
+        // switcher fresh receive credit so the dump keeps flowing.
+        let consumed = self.parser.take_consumed_chunk_bytes();
+        if consumed > 0 {
+            self.pending_credit = self.config.auto_credit_blocks;
+        }
+        match parsed {
             None => Ok(None),
             Some(ParsedDeviceFrame::InitAck) => {
                 if self.state == UsbSessionState::InitSent {
@@ -395,11 +443,79 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn credit_refill_keeps_dump_flowing() {
+        let cp = bmd_atem_atom::encode_atom_change_program_input(0, 3);
+        let ack = [0x02u8, 0x00, 0x01, 0x00];
+        let hdr = |len: u16| {
+            let [l, h] = len.to_le_bytes();
+            vec![0x04, 0x00, 0x01, 0x00, l, h, 0, 0, 0, 0, 0, 0]
+        };
+        let mut session = AtemUsbSession::new(
+            MockBulk::new(vec![
+                ack.to_vec(),
+                hdr(24).into_iter().chain(cp.iter().copied()).chain(cp.iter().copied()).collect(),
+                hdr(24).into_iter().chain(cp.iter().copied()).chain(cp.iter().copied()).collect(),
+            ]),
+            UsbSessionConfig::default(),
+        );
+        let mut now = 0u32;
+        let mut rxb = [0u8; 64];
+        finish_handshake(&mut session, &mut now, &mut rxb).await;
+        now += 1;
+
+        // Chunk 1: initial credit grant flushed, then the first atoms.
+        let ev = session.poll(now, &mut rxb).await.unwrap();
+        let both: Vec<u8> = cp.iter().chain(cp.iter()).copied().collect();
+        assert_eq!(ev, Some(SessionEvent::Atoms { block: both.as_slice(), first: true }));
+        assert_eq!(session.host.outbound.len(), 2);
+        assert_eq!(session.host.outbound[1], build_flow_host(4));
+
+        // Chunk 2: the auto-credit re-grant is flushed before reading it.
+        now += 1;
+        let ev = session.poll(now, &mut rxb).await.unwrap();
+        assert_eq!(ev, Some(SessionEvent::Atoms { block: both.as_slice(), first: false }));
+        assert_eq!(session.host.outbound.len(), 3);
+        assert_eq!(session.host.outbound[2], build_flow_host(4));
+    }
+
+    #[tokio::test]
+    async fn chunk_completing_no_atom_still_earns_credit() {
+        // A chunk that is one giant partial record: consumed but no event yet.
+        let ack = [0x02u8, 0x00, 0x01, 0x00];
+        let partial: Vec<u8> =
+            [0x00u8, 0x20, 0x00, 0x00].into_iter().chain(core::iter::repeat_n(0u8, 8)).collect();
+        let hdr = |len: u16| {
+            let [l, h] = len.to_le_bytes();
+            vec![0x04, 0x00, 0x01, 0x00, l, h, 0, 0, 0, 0, 0, 0]
+        };
+        let mut session = AtemUsbSession::new(
+            MockBulk::new(vec![
+                ack.to_vec(),
+                hdr(12).into_iter().chain(partial.iter().copied()).collect(),
+            ]),
+            UsbSessionConfig::default(),
+        );
+        let mut now = 0u32;
+        let mut rxb = [0u8; 64];
+        finish_handshake(&mut session, &mut now, &mut rxb).await;
+        now += 1;
+
+        // The chunk is consumed (no complete atom → no event), and the next
+        // poll still re-grants credit for it.
+        let ev = session.poll(now, &mut rxb).await.unwrap();
+        assert_eq!(ev, None);
+        now += 1;
+        let ev = session.poll(now, &mut rxb).await.unwrap();
+        assert_eq!(ev, None);
+        assert!(session.host.outbound.iter().any(|w| w == &build_flow_host(4)));
+    }
+
+    #[tokio::test]
     async fn handshake_init_dump_and_command() {
         let dc = bmd_atem_atom::encode_atom_do_transition_cut(0);
         let ack = [0x02u8, 0x00, 0x01, 0x00];
         let mut data = Vec::new();
-        data.extend_from_slice(&[0x04, 0x00, 0x01, 0x00, 0x0c, 0x00]);
+        data.extend_from_slice(&[0x04, 0x00, 0x01, 0x00, 0x0c, 0x00, 0, 0, 0, 0, 0, 0]);
         data.extend_from_slice(&dc);
 
         let mock = MockBulk::new(vec![ack.to_vec(), data]);
@@ -440,7 +556,7 @@ mod tests {
         let cfg = UsbSessionConfig { initial_flow_blocks: None, ..UsbSessionConfig::default() };
         let mock = MockBulk::new(vec![
             ack.to_vec(),
-            vec![0x04, 0x00, 0x01, 0x00, 0x18, 0x00],
+            vec![0x04, 0x00, 0x01, 0x00, 0x18, 0x00, 0, 0, 0, 0, 0, 0],
             cp.to_vec(),
             cp.to_vec(),
         ]);
@@ -559,7 +675,7 @@ mod tests {
         };
         let mock = MockBulk::new(vec![
             ack.to_vec(),
-            vec![0x04, 0x00, 0x01, 0x00, 0x40, 0x00], // 0x0040 bytes announced
+            vec![0x04, 0x00, 0x01, 0x00, 0x40, 0x00, 0, 0, 0, 0, 0, 0], // 0x0040 bytes announced
         ]);
         let mut session = AtemUsbSession::new(mock, cfg);
         let mut now = 0u32;

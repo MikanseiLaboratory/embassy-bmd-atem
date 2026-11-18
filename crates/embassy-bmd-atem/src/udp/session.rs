@@ -4,10 +4,10 @@ use alloc::collections::VecDeque;
 use alloc::vec::Vec;
 use core::net::SocketAddr;
 
+use crate::Error;
 use crate::udp::io::{UdpReceiveBounded, UdpSend};
 use crate::udp::packet::AtemPacket;
 use crate::udp::packet::{AtemControl, AtemPacketFlags};
-use crate::Error;
 
 /// Tunables for queues and timing (MCU-friendly defaults).
 #[derive(Debug, Clone)]

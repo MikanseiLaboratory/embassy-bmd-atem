@@ -145,10 +145,24 @@ pub enum ParsedDeviceFrame {
 ///
 /// Feed every bulk IN transfer ([`push`](StreamParser::push), including zero-length
 /// transfers) and drain events with [`try_next`](StreamParser::try_next) until it
-/// returns `Ok(None)`. The parser tolerates payloads split across any number of
-/// transfers and header/payload packing within one transfer, and resynchronises
-/// by skipping bytes after an invalid header (pyatem ships a corrupted flow-control
-/// frame upstream, so strictness would be counter-productive).
+/// returns `Ok(None)`.
+///
+/// Live-capture facts (ATEM Mini, 2026-11) baked into this parser:
+///
+/// - `0x04` announces one **chunk** of the atom stream; chunks arrive as one or
+///   more bulk IN transfers and end with a short packet / ZLP;
+/// - **atom records straddle chunk boundaries** — the initial state dump is a
+///   continuous stream, so completed chunks are appended to an internal stream
+///   buffer and only **complete atom records** are delivered (a partial record
+///   is carried until the next chunk completes it);
+/// - the device → host `0x04`/`0x03` frames use the full 12-byte header with a
+///   little-endian `u16` at offset 4 (`0x04`) / big-endian `u16` at offset 4
+///   (`0x03`), matching pyatem's shipped parser.
+///
+/// The parser tolerates payloads split across any number of transfers and
+/// header/payload packing within one transfer, and resynchronises by skipping
+/// bytes after an invalid header (pyatem ships a corrupted flow-control frame
+/// upstream, so strictness would be counter-productive).
 #[derive(Debug)]
 pub struct StreamParser {
     layout: DataLenLayout,
@@ -157,10 +171,14 @@ pub struct StreamParser {
     data_remain: usize,
     data: Vec<u8>,
     data_ready: Option<usize>,
+    /// Continuous atom stream with partial-record carry across chunks.
+    stream: Vec<u8>,
+    /// Chunk bytes consumed since the last [`Self::take_consumed_chunk_bytes`].
+    consumed_chunk_bytes: usize,
 }
 
 impl StreamParser {
-    /// Create a parser with the given length layout and maximum accepted atoms blob size.
+    /// Create a parser with the given length layout and maximum accepted chunk size.
     #[must_use]
     pub fn new(layout: DataLenLayout, max_atoms_len: usize) -> Self {
         Self {
@@ -170,19 +188,33 @@ impl StreamParser {
             data_remain: 0,
             data: Vec::new(),
             data_ready: None,
+            stream: Vec::new(),
+            consumed_chunk_bytes: 0,
         }
     }
 
-    /// `true` while no `0x04` blob is being reassembled.
+    /// `true` while no `0x04` chunk is being reassembled and no partial atom is carried.
     #[must_use]
     pub fn is_idle(&self) -> bool {
-        self.data_remain == 0 && self.data_ready.is_none()
+        self.data_remain == 0 && self.data_ready.is_none() && self.stream.is_empty()
     }
 
-    /// Bytes still needed for the in-flight blob.
+    /// Bytes still needed for the in-flight chunk.
     #[must_use]
     pub fn pending_bytes(&self) -> usize {
         self.data_remain
+    }
+
+    /// Bytes of the atom stream carried across chunk boundaries so far.
+    #[must_use]
+    pub fn carried_stream_bytes(&self) -> usize {
+        self.stream.len()
+    }
+
+    /// Chunk bytes consumed since the last call (drives flow-control credit).
+    #[must_use]
+    pub fn take_consumed_chunk_bytes(&mut self) -> usize {
+        core::mem::take(&mut self.consumed_chunk_bytes)
     }
 
     /// Queue freshly read bytes (one bulk IN transfer or a prefix thereof).
@@ -206,23 +238,29 @@ impl StreamParser {
         }
     }
 
-    /// Parse the next complete frame. [`ParsedDeviceFrame::Data`] payloads are copied into
-    /// `out` (which must be at least `max_atoms_len` bytes).
+    /// Parse the next complete frame. [`ParsedDeviceFrame::Data`] delivers the
+    /// **complete atom records** that this chunk completed, copied into `out`
+    /// (contiguous, whole atoms only — partial records are carried internally).
     ///
     /// # Errors
-    /// [`FrameError::InvalidLength`] when the blob exceeds the configured limit or the
-    /// caller's buffer is too small (the parser is resynchronised / delivery deferred).
+    /// [`FrameError::InvalidLength`] when the announced chunk exceeds the
+    /// configured limit, the caller's buffer is too small, or the atom stream is
+    /// corrupt (a record length below 8). The stream buffer is dropped on
+    /// corruption; chunk reassembly resets.
     pub fn try_next(&mut self, out: &mut [u8]) -> Result<Option<ParsedDeviceFrame>, FrameError> {
         loop {
-            // Deliver a completed blob first (or when the caller's buffer is big enough).
-            if let Some(n) = self.data_ready {
-                if out.len() < n {
-                    return Err(FrameError::InvalidLength);
-                }
-                out[..n].copy_from_slice(&self.data);
+            // A completed chunk: move it into the atom stream and deliver
+            // whatever complete atom records it finished.
+            if self.data_ready.take().is_some() {
                 self.data_ready = None;
-                self.data.clear();
-                return Ok(Some(ParsedDeviceFrame::Data { atoms_len: n }));
+                let chunk = core::mem::take(&mut self.data);
+                self.consumed_chunk_bytes = self.consumed_chunk_bytes.saturating_add(chunk.len());
+                self.stream.extend_from_slice(&chunk);
+                let extracted = self.extract_complete_atoms(out)?;
+                if extracted > 0 {
+                    return Ok(Some(ParsedDeviceFrame::Data { atoms_len: extracted }));
+                }
+                continue; // chunk yielded no complete atom yet; keep parsing headers
             }
 
             if self.buf.len() < HEADER_LEN {
@@ -292,28 +330,63 @@ impl StreamParser {
         self.data.clear();
         self.data_remain = 0;
         self.data_ready = None;
+        self.stream.clear();
+        self.consumed_chunk_bytes = 0;
     }
 
-    /// Determine the header prefix length and the announced blob size from the buffer.
-    /// `None` when more bytes are needed.
+    /// Move every complete atom record from the stream buffer into `out`
+    /// (contiguous), leaving the trailing partial record carried. Returns the
+    /// number of bytes written.
+    fn extract_complete_atoms(&mut self, out: &mut [u8]) -> Result<usize, FrameError> {
+        let mut pos = 0usize;
+        loop {
+            let rest = &self.stream[pos..];
+            if rest.len() < 8 {
+                break; // partial record header (or empty)
+            }
+            let alen = usize::from(u16::from_be_bytes([rest[0], rest[1]]));
+            if alen < 8 {
+                // Corrupt stream (a record length below its own header).
+                self.stream.clear();
+                return Err(FrameError::InvalidLength);
+            }
+            if rest.len() < alen {
+                break; // record continues in a later chunk
+            }
+            if pos + alen > out.len() {
+                if pos == 0 {
+                    // The caller's buffer cannot hold even one completed record.
+                    return Err(FrameError::InvalidLength);
+                }
+                break; // deliver what fits, keep the rest carried
+            }
+            out[pos..pos + alen].copy_from_slice(&rest[..alen]);
+            pos += alen;
+        }
+        if pos > 0 {
+            self.stream.drain(..pos);
+        }
+        Ok(pos)
+    }
+
+    /// Determine the header prefix length and the announced chunk size from the
+    /// buffer. `None` when more bytes are needed.
     fn peek_data_len(&self) -> Option<(usize, usize)> {
         match self.layout {
             DataLenLayout::LeAtStart => {
-                if self.buf.len() < HEADER_LEN + 2 {
+                // Live-capture ground truth (ATEM Mini, 2026-11): the device →
+                // host 0x04 frame uses a full 12-byte header with the chunk
+                // length little-endian at offset 4 and six zero bytes of
+                // padding (exactly pyatem's shipped parser).
+                if self.buf.len() < HOST_HEADER_BODY_LEN {
                     return None;
                 }
-                let mut len = usize::from(u16::from_le_bytes([self.buf[4], self.buf[5]]));
-                if len == 0 && self.buf.len() >= HOST_HEADER_BODY_LEN {
-                    // Tolerance for the mirrored layout.
-                    let alt = usize::from(u16::from_be_bytes([self.buf[10], self.buf[11]]));
-                    if alt != 0 {
-                        len = alt;
-                    }
-                    return Some((HOST_HEADER_BODY_LEN, len));
-                }
-                Some((HEADER_LEN + 2, len))
+                let len = usize::from(u16::from_le_bytes([self.buf[4], self.buf[5]]));
+                Some((HOST_HEADER_BODY_LEN, len))
             }
             DataLenLayout::BeAtEnd => {
+                // Documentation-table variant (unverified on hardware): length
+                // big-endian at the body end.
                 if self.buf.len() < HOST_HEADER_BODY_LEN {
                     return None;
                 }
@@ -328,6 +401,7 @@ impl StreamParser {
 
 #[cfg(test)]
 mod tests {
+    use alloc::vec;
     use bmd_atem_atom::encode_atom_do_transition_cut;
 
     use super::*;
@@ -336,15 +410,15 @@ mod tests {
         host_header_device_to_host(PKT_TYPE_INIT_ACK)
     }
 
-    fn data_le(len: u16) -> [u8; 6] {
+    /// Device → host 0x04 frame with the live-captured layout: full 12-byte
+    /// header, length little-endian at offset 4, six zero padding bytes.
+    fn data_le(len: u16) -> [u8; 12] {
         let [l, h] = len.to_le_bytes();
-        host_header_device_to_host(PKT_TYPE_DATA)
-            .iter()
-            .copied()
-            .chain([l, h])
-            .collect::<Vec<u8>>()
-            .try_into()
-            .unwrap()
+        let mut out = [0u8; 12];
+        out[..4].copy_from_slice(&host_header_device_to_host(PKT_TYPE_DATA));
+        out[4] = l;
+        out[5] = h;
+        out
     }
 
     fn data_be(len: u16) -> [u8; 12] {
@@ -460,6 +534,57 @@ mod tests {
         assert_eq!(p.try_next(&mut [0u8; 8]).unwrap(), Some(ParsedDeviceFrame::InitAck));
     }
 
+    /// Byte-exact vectors from the live ATEM Mini capture (2026-11): a
+    /// 0x1000-byte chunk whose atom stream straddles into the next chunk.
+    #[test]
+    fn parses_live_capture_head() {
+        let mut p = StreamParser::new(DataLenLayout::LeAtStart, 0x4000);
+        // 0x03 with 1 RX-block (BE u16 at offset 4).
+        let mut flow = [0u8; 12];
+        flow[..4].copy_from_slice(&host_header_device_to_host(PKT_TYPE_FLOW));
+        flow[5] = 0x01;
+        p.push(&flow);
+        assert_eq!(
+            p.try_next(&mut [0u8; 8]).unwrap(),
+            Some(ParsedDeviceFrame::FlowCtrl { blocks: 1 })
+        );
+
+        // 0x04 announcing a 70-byte chunk: `_ver`, `_pin` ("ATEM Mini") and the
+        // first 6 bytes of a record that only completes in the *next* chunk.
+        let mut chunk: Vec<u8> = Vec::new();
+        chunk.extend_from_slice(&[0x00u8, 0x0c, 0x00, 0x00]); // _ver: len 12
+        chunk.extend_from_slice(b"_ver");
+        chunk.extend_from_slice(&[0x00, 0x02, 0x00, 0x1e]);
+        chunk.extend_from_slice(&[0x00u8, 0x34, 0x00, 0x00]); // _pin: len 52
+        chunk.extend_from_slice(b"_pin");
+        chunk.extend_from_slice(b"ATEM Mini");
+        chunk.extend(core::iter::repeat_n(0u8, 52 - 8 - 9));
+        // Partial record: announces 0x20 bytes but only its first 6 arrive.
+        chunk.extend_from_slice(&[0x00u8, 0x20, 0x00, 0x00, b'M', b'P']);
+
+        p.push(&data_le(chunk.len() as u16));
+        p.push(&chunk);
+        let mut out = vec![0u8; 0x4000];
+        assert_eq!(p.try_next(&mut out).unwrap(), Some(ParsedDeviceFrame::Data { atoms_len: 64 }));
+        assert_eq!(&out[0..8], &[0x00u8, 0x0c, 0x00, 0x00, b'_', b'v', b'e', b'r']);
+        assert_eq!(&out[12..16], &[0x00u8, 0x34, 0x00, 0x00]);
+        assert_eq!(&out[16..20], &b"_pin"[..]);
+        // The incomplete record is carried for the next chunk.
+        assert_eq!(p.carried_stream_bytes(), 6);
+        assert!(!p.is_idle());
+
+        // Second chunk completes the straddling record (mirrors the live dump
+        // where `MPfe` records straddle the 4096-byte boundary).
+        let mut tail: Vec<u8> = Vec::new();
+        tail.extend_from_slice(&[b'f', b'e', 0x00, 0x00, 0x01]); // completes the 0x20-byte record
+        tail.extend(core::iter::repeat_n(0u8, 32 - 6 - 5));
+        p.push(&data_le(tail.len() as u16));
+        p.push(&tail);
+        assert_eq!(p.try_next(&mut out).unwrap(), Some(ParsedDeviceFrame::Data { atoms_len: 32 }));
+        assert_eq!(&out[0..8], &[0x00u8, 0x20, 0x00, 0x00, b'M', b'P', b'f', b'e']);
+        assert_eq!(p.carried_stream_bytes(), 0);
+    }
+
     #[test]
     fn zero_length_blob_is_delivered() {
         let mut p = StreamParser::new(DataLenLayout::LeAtStart, 4096);
@@ -468,5 +593,32 @@ mod tests {
             p.try_next(&mut [0u8; 8]).unwrap(),
             Some(ParsedDeviceFrame::Data { atoms_len: 0 })
         );
+    }
+
+    #[test]
+    fn corrupt_stream_record_clears_and_errors() {
+        let mut p = StreamParser::new(DataLenLayout::LeAtStart, 4096);
+        // A record header whose length field (3) is below its own header size.
+        p.push(&data_le(8));
+        p.push(&[0x00, 0x03, 0x00, 0x00, 0, 0, 0, 0]);
+        let mut out = [0u8; 32];
+        assert_eq!(p.try_next(&mut out), Err(FrameError::InvalidLength));
+        assert_eq!(p.carried_stream_bytes(), 0);
+        // The parser recovers for subsequent frames.
+        p.push(&init_ack());
+        assert_eq!(p.try_next(&mut out).unwrap(), Some(ParsedDeviceFrame::InitAck));
+    }
+
+    #[test]
+    fn consumed_chunk_bytes_drive_credit() {
+        let mut p = StreamParser::new(DataLenLayout::LeAtStart, 4096);
+        assert_eq!(p.take_consumed_chunk_bytes(), 0);
+        let dc = encode_atom_do_transition_cut(0);
+        p.push(&data_le(12));
+        p.push(&dc);
+        let mut out = [0u8; 32];
+        assert_eq!(p.try_next(&mut out).unwrap(), Some(ParsedDeviceFrame::Data { atoms_len: 12 }));
+        assert_eq!(p.take_consumed_chunk_bytes(), 12);
+        assert_eq!(p.take_consumed_chunk_bytes(), 0);
     }
 }

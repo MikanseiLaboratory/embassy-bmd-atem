@@ -81,15 +81,20 @@ implementation lives in `embassy-bmd-atem-std` (`nusb`); embedded backends
 ## Status
 
 - [x] UDP/BURP transport (inherited from edge-bmd-atem, tested)
-- [x] USB 8.6+ framing, session FSM, flow control, keepalives (unit-tested
-      against pyatem wire shapes)
-- [x] Desktop `nusb` backend + CLI
-- [x] RP2040 example scaffold (`thumbv6m-none-eabi` CI build)
-- [ ] Hardware capture to pin the open framing questions in
-      [`docs/PROTOCOL_USB.md`](docs/PROTOCOL_USB.md#open-questions-to-be-settled-with-a-hardware-capture)
-      (device→host `0x04` byte order, `0x05` semantics)
-- [ ] RP2040 full transport bring-up (`cotton-usb-host`) — requires VBUS 5 V
-      supply to the ATEM on the target board
+- [x] USB 8.6+ framing, session FSM, credit-based flow control —
+      **verified against real hardware** (ATEM Mini `0x1EDB:0xBE49`):
+      handshake, full initial state dump (continuous atom stream across
+      chunks), command round-trips (`DCut` → `PrgI`/`TPrvI` responses),
+      bulk-IN stall = idle-signal recovery, and the undocumented
+      `0x05` → `0x06` heartbeat pair (see
+      [`docs/PROTOCOL_USB.md`](docs/PROTOCOL_USB.md))
+- [x] Desktop `nusb` backend + CLI (with `--raw-dump` protocol capture)
+- [x] RP2040 firmware example (RTIC 2 + cotton-usb-host, `thumbv6m` CI build)
+- [ ] Joint hardware debug of the RP2040 firmware over SWD / defmt-RTT
+      (VBUS 5 V supply to the ATEM required on the target board)
+- [ ] `0x05` heartbeat cadence, and whether spontaneous switcher events
+      need a poll (open questions in
+      [`docs/PROTOCOL_USB.md`](docs/PROTOCOL_USB.md#open-questions))
 
 `edge-bmd-atem` is archived; its code lives on here under `embassy_bmd_atem::udp`.
 

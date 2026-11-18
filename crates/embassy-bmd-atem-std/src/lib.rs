@@ -19,12 +19,13 @@
 //!   device is unconfigured (vendor-class composite).
 
 use std::io;
+use std::io::Write as _;
 use std::time::Duration;
 
 use embassy_bmd_atem::usb::io::UsbBulkHost;
-use nusb::descriptors::{InterfaceDescriptor, TransferType};
-use nusb::transfer::{Buffer, Bulk, In, Out};
 use nusb::MaybeFuture as _;
+use nusb::descriptors::{InterfaceDescriptor, TransferType};
+use nusb::transfer::{Buffer, Bulk, In, Out, TransferError};
 
 /// Blackmagic Design USB vendor id.
 pub const USB_VID_BLACKMAGIC: u16 = 0x1EDB;
@@ -68,6 +69,9 @@ pub struct NusbBulkHost {
     ep_in: nusb::Endpoint<Bulk, In>,
     ep_out: nusb::Endpoint<Bulk, Out>,
     _interface: nusb::Interface,
+    /// Optional capture sink: every bulk transfer is appended as one hex line
+    /// (`>` host→device, `<` device→host) for protocol analysis.
+    raw_log: Option<std::fs::File>,
 }
 
 impl NusbBulkHost {
@@ -82,6 +86,18 @@ impl NusbBulkHost {
     pub fn in_max_packet_size(&self) -> usize {
         self.ep_in.max_packet_size()
     }
+
+    /// Attach a raw-transfer capture file (one hex line per transfer).
+    pub fn set_raw_log(&mut self, file: Option<std::fs::File>) {
+        self.raw_log = file;
+    }
+
+    fn log_raw(&mut self, dir: char, data: &[u8]) {
+        if let Some(f) = self.raw_log.as_mut() {
+            let hex: String = data.iter().map(|b| format!("{b:02x}")).collect::<Vec<_>>().join("");
+            let _ = writeln!(f, "{dir}{hex}");
+        }
+    }
 }
 
 /// List connected Blackmagic Design ATEM USB devices, optionally filtered by PID.
@@ -94,9 +110,10 @@ pub fn list_devices(pid: Option<u16>) -> Result<Vec<nusb::DeviceInfo>, HostError
 
 /// Open the control interface of a discovered device and return a bulk host handle.
 ///
-/// With `interface` unset the control interface is auto-detected: the first claimable
-/// vendor-class (`0xFF`) interface carrying a bulk endpoint pair is used, preferring the
-/// `0x02`/`0x82` pair seen on stock ATEM Minis.
+/// With `interface` unset the control interface is auto-detected: every claimable
+/// interface is scanned and the one carrying the classic ATEM pair (bulk OUT
+/// `0x02` / bulk IN `0x82`) is preferred; otherwise the first interface with any
+/// bulk pair is used.
 ///
 /// # Errors
 /// [`HostError::NoControlInterface`] when no candidate is found, or backend failures.
@@ -114,33 +131,67 @@ pub async fn open_device(
         let _ = device.set_configuration(1).await;
     }
 
+    let explicit = interface.is_some();
     let scan = match interface {
         Some(iface) => iface..=iface,
         None => 0u8..=8u8,
     };
+
+    // Pass 1: find every claimable interface with a bulk pair, ranking the
+    // classic ATEM control pair (0x02/0x82) first. Claims are released by drop.
+    let mut best: Option<(i32, u8, u8, u8)> = None; // (rank, iface, out, in)
     for iface in scan {
-        let interface_handle = match device.claim_interface(iface).await {
-            Ok(i) => i,
-            Err(_) => {
-                #[cfg(target_os = "linux")]
-                match device.detach_and_claim_interface(iface).await {
-                    Ok(i) => i,
-                    Err(_) => continue,
-                }
-                #[cfg(not(target_os = "linux"))]
-                continue;
-            }
+        let Some((out_addr, in_addr)) = scan_interface(&device, iface, out_ep, in_ep).await else {
+            continue;
         };
-        let Some(desc) = interface_handle.descriptor() else { continue };
-        if let Some((out_addr, in_addr)) = pick_bulk_pair(&desc, out_ep, in_ep) {
-            let ep_out =
-                interface_handle.endpoint::<Bulk, Out>(out_addr).map_err(HostError::Nusb)?;
-            let ep_in = interface_handle.endpoint::<Bulk, In>(in_addr).map_err(HostError::Nusb)?;
-            return Ok(NusbBulkHost { ep_in, ep_out, _interface: interface_handle });
+        let rank = i32::from(out_addr == 0x02 && in_addr == 0x82);
+        if explicit {
+            best = Some((rank, iface, out_addr, in_addr));
+            break;
         }
-        // Not the control interface; the claim is released on drop.
+        if best.is_none_or(|(best_rank, ..)| rank > best_rank) {
+            best = Some((rank, iface, out_addr, in_addr));
+        }
     }
-    Err(HostError::NoControlInterface)
+    let Some((_, iface, out_addr, in_addr)) = best else {
+        return Err(HostError::NoControlInterface);
+    };
+
+    // Pass 2: re-claim the chosen interface and open its endpoints.
+    let interface_handle = claim_interface(&device, iface).await?;
+    let ep_out = interface_handle.endpoint::<Bulk, Out>(out_addr).map_err(HostError::Nusb)?;
+    let ep_in = interface_handle.endpoint::<Bulk, In>(in_addr).map_err(HostError::Nusb)?;
+    Ok(NusbBulkHost { ep_in, ep_out, _interface: interface_handle, raw_log: None })
+}
+
+/// Claim an interface, detaching a kernel driver on Linux when necessary.
+async fn claim_interface(device: &nusb::Device, iface: u8) -> Result<nusb::Interface, HostError> {
+    match device.claim_interface(iface).await {
+        Ok(handle) => Ok(handle),
+        Err(e) => {
+            #[cfg(target_os = "linux")]
+            match device.detach_and_claim_interface(iface).await {
+                Ok(handle) => Ok(handle),
+                Err(e) => Err(HostError::Nusb(e)),
+            }
+            #[cfg(not(target_os = "linux"))]
+            Err(HostError::Nusb(e))
+        }
+    }
+}
+
+/// Claim `iface` and return its bulk endpoint pair (hints honoured when given).
+async fn scan_interface(
+    device: &nusb::Device,
+    iface: u8,
+    out_hint: Option<u8>,
+    in_hint: Option<u8>,
+) -> Option<(u8, u8)> {
+    let handle = claim_interface(device, iface).await.ok()?;
+    let desc = handle.descriptor()?;
+    let pair = pick_bulk_pair(&desc, out_hint, in_hint);
+    drop(handle); // release the claim
+    pair
 }
 
 /// Pick the bulk OUT/IN pair from an interface descriptor, honouring explicit hints.
@@ -195,19 +246,33 @@ impl UsbBulkHost for NusbBulkHost {
         let requested = buf.len().next_multiple_of(mps);
         self.ep_in.submit(Buffer::new(requested));
         let completion = self.ep_in.next_complete().await;
-        match completion.status {
-            Ok(()) => {
-                let n = completion.actual_len.min(buf.len());
-                buf[..n].copy_from_slice(&completion.buffer[..n]);
-                Ok(n)
-            }
-            Err(e) => Err(HostError::Transfer(e)),
+        if completion.status == Err(TransferError::Stall) {
+            // Device signalled a protocol violation; clear the halt and report
+            // an empty read so the session can attempt recovery.
+            self.ep_in.clear_halt().await.map_err(HostError::Nusb)?;
+            eprintln!("[usb] bulk IN stalled (cleared halt)");
+            return Ok(0);
+        }
+        let result = completion.status;
+        if result.is_ok() {
+            let n = completion.actual_len.min(buf.len());
+            buf[..n].copy_from_slice(&completion.buffer[..n]);
+            self.log_raw('<', &buf[..n]);
+            Ok(n)
+        } else {
+            Err(HostError::Transfer(result.expect_err("checked above")))
         }
     }
 
     async fn write_bulk(&mut self, data: &[u8]) -> Result<(), Self::Error> {
+        self.log_raw('>', data);
         self.ep_out.submit(Buffer::from(data));
         let completion = self.ep_out.next_complete().await;
+        if completion.status == Err(TransferError::Stall) {
+            self.ep_out.clear_halt().await.map_err(HostError::Nusb)?;
+            eprintln!("[usb] bulk OUT stalled (cleared halt)");
+            return Err(HostError::Transfer(TransferError::Stall));
+        }
         completion.status.map_err(HostError::Transfer)
     }
 
