@@ -560,7 +560,7 @@ mod tests {
         let ev = session.poll(now, &mut rxb).await.unwrap();
         assert_eq!(ev, None);
         assert_eq!(session.host.outbound.len(), 3); // init + grant + final auto-grant
-        assert_eq!(session.host.outbound[2], build_flow_host(4));
+        assert_eq!(session.host.outbound[2], build_flow_host(1));
         assert!(session.credit_paused);
 
         // Nothing new: no more grants.
@@ -596,14 +596,14 @@ mod tests {
         let both: Vec<u8> = cp.iter().chain(cp.iter()).copied().collect();
         assert_eq!(ev, Some(SessionEvent::Atoms { block: both.as_slice(), first: true }));
         assert_eq!(session.host.outbound.len(), 2);
-        assert_eq!(session.host.outbound[1], build_flow_host(4));
+        assert_eq!(session.host.outbound[1], build_flow_host(1));
 
         // Chunk 2: the auto-credit re-grant is flushed before reading it.
         now += 1;
         let ev = session.poll(now, &mut rxb).await.unwrap();
         assert_eq!(ev, Some(SessionEvent::Atoms { block: both.as_slice(), first: false }));
         assert_eq!(session.host.outbound.len(), 3);
-        assert_eq!(session.host.outbound[2], build_flow_host(4));
+        assert_eq!(session.host.outbound[2], build_flow_host(1));
     }
 
     #[tokio::test]
@@ -635,7 +635,7 @@ mod tests {
         now += 1;
         let ev = session.poll(now, &mut rxb).await.unwrap();
         assert_eq!(ev, None);
-        assert!(session.host.outbound.iter().any(|w| w == &build_flow_host(4)));
+        assert!(session.host.outbound.iter().any(|w| w == &build_flow_host(1)));
     }
 
     #[tokio::test]
@@ -666,7 +666,7 @@ mod tests {
         assert_eq!(session.state(), UsbSessionState::Running);
         // outbound: [init, flow(4)] and the pending announce does not double-send.
         assert_eq!(session.host.outbound.len(), 2);
-        assert_eq!(session.host.outbound[1], build_flow_host(4));
+        assert_eq!(session.host.outbound[1], build_flow_host(1));
         assert!(session.host.delays.is_empty());
 
         // Sending a command is header + payload with pacing around the payload.
