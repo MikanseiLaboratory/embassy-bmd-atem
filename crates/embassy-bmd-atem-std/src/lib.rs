@@ -1,7 +1,7 @@
 //! Desktop (std / Tokio) host backend for the Blackmagic Design ATEM USB-C
 //! control link, built on [`nusb`].
 //!
-//! Implements [`UsbBulkHost`](embassy_bmd_atem::UsbBulkHost) over one claimed
+//! Implements [`UsbBulkHost`] over one claimed
 //! bulk endpoint pair of the switcher's vendor-specific control interface
 //! (bulk OUT `0x02` / bulk IN `0x82` on stock ATEM Minis; otherwise discovered
 //! from the interface descriptors).

@@ -123,7 +123,7 @@ impl<E: core::fmt::Debug + 'static> std::error::Error for UsbSessionError<E> {}
 /// Live USB 8.6+ controller session.
 ///
 /// `poll` is the main entry point: each call may produce at most one event
-/// ([`Ok(None)`]s mean "nothing complete yet"). Events borrow the `buf` passed in, so
+/// (`Ok(None)`s mean "nothing complete yet"). Events borrow the `buf` passed in, so
 /// consume them (or `to_vec` the block) before the next call. `send_atoms` may be
 /// interleaved with polling; over USB there is no ACK/retransmission machinery.
 #[derive(Debug)]
