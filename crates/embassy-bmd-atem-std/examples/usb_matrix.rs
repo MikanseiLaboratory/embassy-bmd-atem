@@ -176,11 +176,6 @@ async fn run() {
     println!("== done ==");
 }
 
-fn session_is_stalled<H: embassy_bmd_atem::UsbBulkHost>(_s: &mut AtemUsbSession<H>) -> bool {
-    // The idle-stall is signalled through Ok(None) reads; nothing extra to query.
-    true
-}
-
 async fn backend_sleep(ms: u64) {
     tokio::time::sleep(Duration::from_millis(ms)).await;
 }
