@@ -119,23 +119,57 @@ implementation lives in `embassy-bmd-atem-std` (`nusb`); embedded backends
 
 ## Status
 
-- [x] UDP/BURP transport (inherited from edge-bmd-atem, tested)
-- [x] USB 8.6+ framing, session FSM, credit-based flow control —
+- [x] UDP/BURP transport (carried over from the archived `edge-bmd-atem`, tested)
+- [x] USB 8.6+ framing, session FSM, flow-control windows —
       **verified against real hardware** (ATEM Mini `0x1EDB:0xBE49`):
       handshake, full initial state dump (continuous atom stream across
       chunks), command round-trips (`DCut` → `PrgI`/`TPrvI` responses),
       bulk-IN stall = idle-signal recovery, and the undocumented
       `0x05` → `0x06` heartbeat pair (see
       [`docs/PROTOCOL_USB.md`](docs/PROTOCOL_USB.md))
+- [x] Cross-checked against `pyatem` on the same switcher with Linux `usbmon`:
+      ZLP keepalive at ~510 ms and a 1-block flow window are the reference
+      client's behaviour and are now this crate's defaults
+- [x] Shared atom layer: `AtomWriter` (build once) + `link::frame_command`
+      (wrap for either transport), with tests proving both framings carry
+      byte-identical payloads
 - [x] Desktop `nusb` backend + CLI (with `--raw-dump` protocol capture)
 - [x] RP2040 firmware example (RTIC 2 + cotton-usb-host, `thumbv6m` CI build)
+- [x] CI on every push/PR; tag-driven release workflow publishing all three
+      crates to crates.io
 - [ ] Joint hardware debug of the RP2040 firmware over SWD / defmt-RTT
-      (VBUS 5 V supply to the ATEM required on the target board)
+      (needs a powered USB-C OTG hub so the switcher sees VBUS)
 - [ ] `0x05` heartbeat cadence, and whether spontaneous switcher events
       need a poll (open questions in
       [`docs/PROTOCOL_USB.md`](docs/PROTOCOL_USB.md#open-questions))
 
-`edge-bmd-atem` is archived; its code lives on here under `embassy_bmd_atem::udp`.
+### Migrating from `edge-bmd-atem`
+
+That repository is **archived**; its UDP/BURP implementation lives on here as
+`embassy_bmd_atem::udp` and every item is re-exported at the crate root, so the
+move is a rename:
+
+```toml
+# before
+edge_bmd_atem = { git = "https://github.com/MikanseiLaboratory/edge-bmd-atem", default-features = false }
+# after
+embassy-bmd-atem = { version = "0.1", default-features = false }
+```
+
+```rust
+// before
+use edge_bmd_atem::io::{ErrorType, UdpReceive, UdpReceiveBounded, UdpSend};
+// after
+use embassy_bmd_atem::{ErrorType, UdpReceive, UdpReceiveBounded, UdpSend};
+```
+
+Module paths: `io`/`packet`/`session`/`udp` → `embassy_bmd_atem::udp::{io, packet, session, mock}`.
+
+### Releasing
+
+Push a `v*` tag (or run *Release* manually). The workflow verifies everything,
+then publishes `bmd-atem-atom` → `embassy-bmd-atem` → `embassy-bmd-atem-std`
+and opens a GitHub release. It needs a `CARGO_REGISTRY_TOKEN` secret.
 
 ## License
 
