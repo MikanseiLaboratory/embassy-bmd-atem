@@ -21,16 +21,18 @@
 extern crate alloc;
 
 pub mod error;
+pub mod link;
 pub mod udp;
 pub mod usb;
 
 pub use bmd_atem_atom::{
-    AtomIter, FourCc, NextTransitionStyle, RawAtom, RawAtomSlice, encode_atom_change_preview_input,
-    encode_atom_change_program_input, encode_atom_change_transition_next, encode_atom_do_ftb_auto,
-    encode_atom_do_ftb_cut, encode_atom_do_transition_auto, encode_atom_do_transition_cut,
-    parse_atoms,
+    AtomIter, AtomWriter, FourCc, NextTransitionStyle, RawAtom, RawAtomSlice,
+    encode_atom_change_preview_input, encode_atom_change_program_input,
+    encode_atom_change_transition_next, encode_atom_do_ftb_auto, encode_atom_do_ftb_cut,
+    encode_atom_do_transition_auto, encode_atom_do_transition_cut, is_valid_atom_blob, parse_atoms,
 };
 pub use error::Error;
+pub use link::{FrameContext, FramePlan, TransportKind, frame_command};
 
 pub use udp::{
     ATEM_UDP_PORT, AtemControl, AtemPacket, AtemPacketFlags, AtemPacketPayload, AtemSession,

@@ -17,6 +17,7 @@ extern crate alloc;
 
 mod atoms;
 mod error;
+mod writer;
 
 pub use atoms::{
     AtomIter, FourCc, NextTransitionStyle, RawAtom, RawAtomSlice, encode_atom_change_preview_input,
@@ -25,3 +26,4 @@ pub use atoms::{
     parse_atoms,
 };
 pub use error::Error;
+pub use writer::{AtomWriter, atoms, is_valid_atom_blob, split_atoms};

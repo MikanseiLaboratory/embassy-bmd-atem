@@ -175,6 +175,30 @@ impl AtemSession {
         self.next_sender_packet_id
     }
 
+    /// Build a command packet carrying `atoms` and register it for
+    /// retransmission, so the same [`AtomWriter`](bmd_atem_atom::AtomWriter)
+    /// payload used with the USB transport can go out over BURP unchanged.
+    ///
+    /// The caller sends `packet.to_bytes()` to the switcher and feeds incoming
+    /// datagrams back through [`handle_incoming`](Self::handle_incoming).
+    pub fn command_packet(
+        &mut self,
+        sender_packet_id: u16,
+        atoms: &[u8],
+        now_ms: u32,
+    ) -> AtemPacket {
+        let packet = AtemPacket::with_atoms(
+            AtemPacketFlags::default(),
+            self.state.session_id,
+            0,
+            0,
+            sender_packet_id,
+            atoms.to_vec(),
+        );
+        self.register_pending_ack(sender_packet_id, packet.to_bytes(), now_ms);
+        packet
+    }
+
     /// Allocate the next local `sender_packet_id` (1..=0x7fff, wrapping).
     pub fn take_sender_packet_id(&mut self) -> u16 {
         let v = self.next_sender_packet_id;

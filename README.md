@@ -47,6 +47,38 @@ atem-usb-control --send "FtbA 0"       # fade to black
 - Protocol support is the **8.6+ USB generation** (ATEM Mini family on
   firmware ≥ 8.6). Older firmware simply times out on the handshake.
 
+### One command, either transport
+
+Both transports carry **identical atom records**; only the wrapper differs.
+Build the payload once with `AtomWriter` and frame it for whichever link is up:
+
+```rust,ignore
+use embassy_bmd_atem::{AtomWriter, FourCc, frame_command, FrameContext, FramePlan, TransportKind};
+
+let mut atoms = [0u8; 64];
+let mut w = AtomWriter::new(&mut atoms);
+w.push_source(FourCc(*b"CPgI"), 0, 3).unwrap(); // program input 3 on ME1
+
+let mut wire = [0u8; 128];
+match frame_command(TransportKind::Usb, FrameContext::usb(), w.as_slice(), &mut wire)? {
+    FramePlan::AnnounceThenPayload { announce, payload } => {
+        // USB: two bulk writes — the 0x04 announce, then the payload.
+        let _ = (announce, payload);
+    }
+    FramePlan::Datagram(datagram) => {
+        // UDP: one datagram (the arm used with TransportKind::Udp).
+        let _ = datagram;
+    }
+}
+```
+
+| | UDP / BURP | USB-C 8.6+ |
+|---|---|---|
+| wrapper | 12-byte header (flags, session, packet ids) | `0x04` announce + payload |
+| connection | `0x01` Connect / `0x02` ConnectAck | `0x01` init / `0x02` ack |
+| reliability | ACK queue + retransmission | none; flow-control windows |
+| payload | **atom records** | **atom records** |
+
 ### UDP from an MCU (edge-nal style)
 
 ```rust,ignore
@@ -54,7 +86,14 @@ let mut session = embassy_bmd_atem::AtemSession::connect(
     &mut udp, remote, 0x2970, SessionConfig::default(),
     || t.elapsed().as_millis() as u32,
 ).await?;
-session.send_atoms(&embassy_bmd_atem::encode_atom_change_program_input(0, 3), now);
+
+// Commands go through the session so packet ids and the ACK queue are tracked:
+let mut atoms = [0u8; 32];
+let mut w = embassy_bmd_atem::AtomWriter::new(&mut atoms);
+w.push_source(embassy_bmd_atem::FourCc(*b"CPgI"), 0, 3).unwrap();
+let pid = session.take_sender_packet_id();
+let pkt = session.command_packet(pid, w.as_slice(), 0);
+udp.send(remote, &pkt.to_bytes()).await?;
 ```
 
 ### USB host session (embedded)
