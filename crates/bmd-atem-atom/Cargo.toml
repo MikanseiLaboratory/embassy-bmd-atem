@@ -1,0 +1,14 @@
+[package]
+name = "bmd-atem-atom"
+description = "Blackmagic Design ATEM atom (command record) codec shared by the UDP/BURP and USB transports"
+keywords = ["atem", "blackmagic", "broadcast", "embedded"]
+categories = ["embedded", "network-programming"]
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+
+[lints]
+workspace = true

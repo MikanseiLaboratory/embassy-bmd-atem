@@ -1,0 +1,34 @@
+[package]
+name = "embassy-bmd-atem"
+description = "Blackmagic Design ATEM control protocol for embedded Rust: UDP/BURP (edge-nal style) and USB-C 8.6+ host"
+keywords = ["atem", "blackmagic", "broadcast", "embedded", "usb"]
+categories = ["embedded", "network-programming"]
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[features]
+default = []
+# Host / integration tests: Tokio-backed async runtime and mocks.
+std = ["dep:tokio"]
+# defmt logging for firmware builds.
+defmt = ["dep:defmt"]
+
+[dependencies]
+bmd-atem-atom = { workspace = true }
+embedded-io-async = { workspace = true }
+defmt = { workspace = true, optional = true }
+tokio = { workspace = true, optional = true, features = ["macros", "rt", "sync"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread", "time", "sync"] }
+clap = { workspace = true }
+embedded-io-async = { workspace = true, features = ["std"] }
+
+[[example]]
+name = "std_handshake"
+required-features = ["std"]
+
+[lints]
+workspace = true

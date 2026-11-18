@@ -1,0 +1,20 @@
+This project includes protocol structure and behaviour derived from
+study of the following third-party sources:
+
+  - "necromancer" (Apache-2.0), https://github.com/micolous/necromancer
+    UDP/BURP packet layer and atom record definitions.
+
+  - "pyatem" / OpenSwitcher (LGPL-3.0), https://git.sr.ht/~martijnbraam/pyatem
+    Wire-format facts of the ATEM USB-C "8.6+" control link.
+    Only documented behaviour was used; no source code was copied.
+
+  - OpenSwitcher documentation, https://docs.openswitcher.org/
+    Reference for the ATEM USB control protocol generations.
+
+The `bmd-atem-atom` crate is derived from the former `edge-bmd-atem` crate
+(https://github.com/MikanseiLaboratory/edge-bmd-atem, Apache-2.0) by the
+same authors; the upstream repository is now archived in favour of this one.
+
+UDP trait signatures in this crate follow the `edge-nal` 0.6 `UdpSend` /
+`UdpReceive` contracts (MIT OR Apache-2.0) without linking that crate, so
+host `cargo test` stays free of `embassy-time` driver symbols.

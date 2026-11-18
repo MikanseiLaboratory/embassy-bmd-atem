@@ -1,0 +1,10 @@
+# Fixture: minimal USB 8.6+ tunnel trace (synthetic; replaces the pending
+# hardware capture, see docs/PROTOCOL_USB.md "Open questions").
+# Format: one bulk transfer per line (hex). Direction is implicit by order:
+# OUT lines would start 00 xx 00 01; IN lines xx 00 01 00.
+02 00 01 00
+04 00 01 00 18 00
+00 0c 00 00 43 50 67 49 00 00 00 03
+00 0c 00 00 44 43 75 74 00 00 00 00
+03 00 01 00 00 02 00 00 00 00 00 00
+04 00 01 00 00 00
