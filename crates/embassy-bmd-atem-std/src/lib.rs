@@ -30,6 +30,11 @@ use nusb::transfer::{Buffer, Bulk, In, Out, TransferError};
 /// Blackmagic Design USB vendor id.
 pub const USB_VID_BLACKMAGIC: u16 = 0x1EDB;
 
+/// Upper bound for one bulk IN transfer wait. The switcher may leave a read
+/// pending indefinitely (see [`NusbBulkHost`]); timing out lets the session's
+/// caller keep driving keepalives and polls.
+pub const READ_TIMEOUT: Duration = Duration::from_millis(150);
+
 /// Known ATEM switcher USB product ids (see `NOTICE` and `docs/PROTOCOL_USB.md`).
 ///
 /// `0xBE49` ATEM Mini, `0xBE55` ATEM Mini Pro, `0xBE56` ATEM Mini Pro ISO,
@@ -255,13 +260,23 @@ impl UsbBulkHost for NusbBulkHost {
         let mps = self.ep_in.max_packet_size().max(1);
         let requested = buf.len().next_multiple_of(mps);
         self.ep_in.submit(Buffer::new(requested));
-        let completion = self.ep_in.next_complete().await;
+        // Bounded wait: the switcher can leave a bulk IN transfer pending
+        // indefinitely when it has nothing to say (it does not always stall).
+        // Without this timeout the session's `poll` would block forever and
+        // caller-side timers (keepalives, polls) could never run.
+        let completion = match tokio::time::timeout(READ_TIMEOUT, self.ep_in.next_complete()).await
+        {
+            Ok(c) => c,
+            Err(_) => return Ok(0), // timed out: report "nothing available"
+        };
         if completion.status == Err(TransferError::Stall) {
-            // Device signalled a protocol violation; clear the halt and report
-            // an empty read so the session can attempt recovery.
+            // The switcher stalls the IN endpoint when it has nothing queued
+            // (an idle signal). Real hardware then refuses OUT transfers as
+            // well until *both* endpoint halts are cleared, so clear both.
             self.ep_in.clear_halt().await.map_err(HostError::Nusb)?;
+            let _ = self.ep_out.clear_halt().await;
             self.stall_flag = true;
-            eprintln!("[usb] bulk IN stalled (cleared halt)");
+            eprintln!("[usb] bulk IN stalled (both halts cleared)");
             return Ok(0);
         }
         let result = completion.status;

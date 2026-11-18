@@ -33,6 +33,11 @@ pub const PKT_TYPE_DATA: u8 = 0x04;
 /// USB-tunnel packet type with no documented purpose (host → device); tolerated.
 pub const PKT_TYPE_HOST_MISC: u8 = 0x05;
 
+/// Highest device → host packet type observed on real hardware (`0x06`, the
+/// heartbeat response to a host `0x05`). Larger type bytes are treated as
+/// desynchronised garbage rather than frames.
+pub const PKT_TYPE_UNKNOWN_MAX: u8 = 0x06;
+
 /// Payload of the initiating `0x01` packet. Per OpenSwitcher docs the meaning is unknown.
 pub const INIT_PAYLOAD: [u8; 4] = [0x00, 0x01, 0x10, 0x92];
 
@@ -321,10 +326,19 @@ impl StreamParser {
                     }
                     continue; // deliver the blob (possibly already complete) from the loop head
                 }
-                t => {
-                    // Unknown device-packet type (e.g. 0x05): tolerated, header only.
+                t if t <= PKT_TYPE_UNKNOWN_MAX => {
+                    // Unknown-but-plausible device-packet type (e.g. 0x05/0x06):
+                    // tolerated, header only.
                     self.buf.drain(..HEADER_LEN);
                     return Ok(Some(ParsedDeviceFrame::Unknown { pkt_type: t }));
+                }
+                _ => {
+                    // Type byte outside the plausible range: almost certainly a
+                    // false header match inside desynchronised atom data. Skip
+                    // one byte and keep resynchronising instead of emitting a
+                    // bogus frame (live capture produced floods of these).
+                    self.buf.remove(0);
+                    continue;
                 }
             }
         }

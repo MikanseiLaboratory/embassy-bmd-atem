@@ -327,18 +327,46 @@ impl<H: UsbBulkHost> AtemUsbSession<H> {
         self.write_atoms(&TIRQ, now_ms).await
     }
 
+    /// Send an arbitrary command atom followed by a fresh credit grant.
+    ///
+    /// # Errors
+    /// [`UsbSessionError::NotConnected`] before the handshake, backend failures.
+    pub async fn poll_ping_stod(
+        &mut self,
+        atoms: &[u8],
+        now_ms: u32,
+    ) -> Result<(), UsbSessionError<H::Error>> {
+        if !matches!(self.state, UsbSessionState::Acked | UsbSessionState::Running) {
+            return Err(UsbSessionError::NotConnected);
+        }
+        self.write_atoms(atoms, now_ms).await
+    }
+
     /// Grant receive credit and wait for whatever is queued to flush.
+    ///
+    /// Live-verified ordering: the switcher **stalls the OUT endpoint** if the
+    /// host sends a new command after a response without first re-granting
+    /// receive credit (observed: 2nd poll of a pair always failed until the
+    /// grant moved in front of the command). So the grant goes **before** the
+    /// command, with a second grant after it for the longer responses.
     async fn write_atoms(
         &mut self,
         atoms: &[u8],
         now_ms: u32,
     ) -> Result<(), UsbSessionError<H::Error>> {
-        self.send_atoms(atoms, now_ms).await?;
         let blocks = self.config.auto_credit_blocks.unwrap_or(1);
+        // Pre-grant: reopen the device's transmit window.
         self.host
             .write_bulk(&crate::usb::protocol::build_flow_host(blocks))
             .await
             .map_err(UsbSessionError::Backend)?;
+        self.send_atoms(atoms, now_ms).await?;
+        // Post-grant: cover the response (may be multiple 0x04 chunks).
+        self.host
+            .write_bulk(&crate::usb::protocol::build_flow_host(blocks))
+            .await
+            .map_err(UsbSessionError::Backend)?;
+        self.credit_paused = false;
         self.last_tx_ms = now_ms;
         Ok(())
     }

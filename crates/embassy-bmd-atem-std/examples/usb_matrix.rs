@@ -45,21 +45,45 @@ async fn run() {
     }
     println!("state: {:?}", session.state());
 
-    println!("== P2: idle (expect IN stall -> credit pause) ==");
-    let deadline = Instant::now() + Duration::from_secs(3);
-    while Instant::now() < deadline {
-        match session.poll(now(), &mut buf).await {
-            Ok(None) => {
-                println!("[idle] read empty (stall={})", session_is_stalled(&mut session));
-                break;
+    println!("== P2: SToD (set switcher clock, like ASC at startup) ==");
+    {
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as u32)
+            .unwrap_or(0);
+        let mut stod = Vec::with_capacity(16);
+        stod.extend_from_slice(&[0x00, 0x10, 0x00, 0x00, b'S', b'T', b'o', b'D']);
+        stod.extend_from_slice(&ts.to_be_bytes());
+        stod.extend_from_slice(&[0, 0, 0, 0]);
+        match session.poll_ping_stod(&stod, now()).await {
+            Ok(()) => println!("[stod] sent ({ts})"),
+            Err(e) => println!("[stod] FAILED: {e}"),
+        }
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while Instant::now() < deadline {
+            match session.poll(now(), &mut buf).await {
+                Ok(Some(SessionEvent::Atoms { block, .. })) => {
+                    let mut names = Vec::new();
+                    for atom in bmd_atem_atom::AtomIter::new(block).flatten() {
+                        names.push(atom.name.display_lossy().to_string());
+                    }
+                    println!("[stod] RESP: {} B {:?}", block.len(), names);
+                }
+                Ok(None) => {
+                    println!("[stod] idle-stall");
+                    break;
+                }
+                Ok(Some(ev)) => println!("[stod] ev: {ev:?}"),
+                Err(e) => {
+                    println!("[stod] err: {e}");
+                    break;
+                }
             }
-            Ok(Some(ev)) => println!("[idle] ev: {ev:?}"),
-            Err(e) => println!("[idle] err: {e}"),
         }
     }
 
-    println!("== P3: TiRq probe x4 (2s spacing) ==");
-    for i in 1..=4 {
+    println!("== P3: TiRq probe x2 (pyatem-mode: ZLP 500ms + TiRq 2s) ==");
+    for i in 1..=2 {
         println!("[tirq {i}] send…");
         match session.poll_ping(now()).await {
             Ok(()) => println!("[tirq {i}] announce+atoms+credit OK"),
@@ -90,10 +114,17 @@ async fn run() {
         backend_sleep(2000).await;
     }
 
-    println!("== P4: BUTTON WATCH 25s — press ATEM buttons now! ==");
-    let deadline = Instant::now() + Duration::from_secs(25);
+    println!("== P4: BUTTON WATCH 30s (pyatem-mode: ZLP every 500ms) — press ATEM buttons now! ==");
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let mut next_zlp = Instant::now() + Duration::from_millis(500);
     let mut next_ping = Instant::now() + Duration::from_secs(2);
     while Instant::now() < deadline {
+        if Instant::now() >= next_zlp {
+            // pyatem keep_alive: bare ZLP, errors swallowed (the backend
+            // clears the halt on stall).
+            let _ = session.write_raw(&[], now()).await;
+            next_zlp += Duration::from_millis(500);
+        }
         if Instant::now() >= next_ping {
             let _ = session.poll_ping(now()).await;
             println!("[watch] ping");
