@@ -150,3 +150,38 @@ recovery is `0x01` re-handshake after unplug/replug.
 4. Whether the remaining switcher state (media pool, keys, …) arrives on
    demand or only in later dumps.
 5. The meaning of the `00 01 10 92` init payload.
+
+## Capture attempt log (2026-11-18)
+
+An attempt to record ATEM Software Control's own USB traffic (the definitive
+way to settle the polling discipline) hit two blockers worth recording:
+
+1. **USBPcap captured 0 packets on every root hub** — this PC exposes five
+   `USB\ROOT_HUB30` (xHCI/USB 3.0) controllers and no USB 2.0 companion
+   controller. USBPcap's xHCI support is known to be unreliable, so the tool
+   enumerated `\\.\USBPcap1..4` and produced header-only pcap files. Captures
+   must be taken on a machine with a USB 2.0 root hub, or on Linux with
+   `usbmon`.
+2. **ATEM Software Control connected over the network, not USB** — with both
+   cables attached it opened UDP sockets (ephemeral ports) and generated no USB
+   traffic at all. To capture its USB behaviour the ATEM's Ethernet cable has
+   to be disconnected (or the USB device selected explicitly in ASC), so that
+   USB is the only control path.
+
+Both are environmental, not protocol, issues. The recovery procedure in
+`capture_asc.ps1` (elevated `pnputil /remove-device` + `/scan-devices`)
+successfully rebinds the Blackmagic driver after a Zadig WinUSB override, which
+is the prerequisite for ASC-side captures.
+
+### pyatem's transmit discipline (to emulate if captures stay unavailable)
+
+`pyatem`'s `UsbProtocol` never leaves the OUT pipe idle:
+
+- idle loop: write a **zero-length OUT packet** and sleep 20 ms;
+- while traffic is recent (`< 10 ms`) or more than 1 KiB is buffered: write a
+  `0x03` flow frame every ~10 ms;
+- commands: `0x04` announce, then the payload, with a 4 ms sleep after each.
+
+This "always keep writing" pattern is the most likely reason the switcher never
+idles out on real software, and is worth implementing as an explicit discipline
+mode once captures confirm it.
