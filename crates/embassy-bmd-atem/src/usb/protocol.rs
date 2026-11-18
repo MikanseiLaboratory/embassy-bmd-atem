@@ -249,18 +249,24 @@ impl StreamParser {
     /// corruption; chunk reassembly resets.
     pub fn try_next(&mut self, out: &mut [u8]) -> Result<Option<ParsedDeviceFrame>, FrameError> {
         loop {
-            // A completed chunk: move it into the atom stream and deliver
-            // whatever complete atom records it finished.
-            if self.data_ready.take().is_some() {
-                self.data_ready = None;
-                let chunk = core::mem::take(&mut self.data);
-                self.consumed_chunk_bytes = self.consumed_chunk_bytes.saturating_add(chunk.len());
-                self.stream.extend_from_slice(&chunk);
+            // Deliver complete atoms from the stream: either freshly completed
+            // by a chunk, or stranded by a previous partial extraction (the
+            // caller's buffer was full). This keeps a large chunk draining
+            // across several calls without waiting for more USB data.
+            if self.stream.len() >= 8 {
                 let extracted = self.extract_complete_atoms(out)?;
                 if extracted > 0 {
                     return Ok(Some(ParsedDeviceFrame::Data { atoms_len: extracted }));
                 }
-                continue; // chunk yielded no complete atom yet; keep parsing headers
+            }
+
+            // A completed chunk: move it into the atom stream and retry the
+            // extraction from the loop head.
+            if self.data_ready.take().is_some() {
+                let chunk = core::mem::take(&mut self.data);
+                self.consumed_chunk_bytes = self.consumed_chunk_bytes.saturating_add(chunk.len());
+                self.stream.extend_from_slice(&chunk);
+                continue;
             }
 
             if self.buf.len() < HEADER_LEN {
@@ -620,5 +626,31 @@ mod tests {
         assert_eq!(p.try_next(&mut out).unwrap(), Some(ParsedDeviceFrame::Data { atoms_len: 12 }));
         assert_eq!(p.take_consumed_chunk_bytes(), 12);
         assert_eq!(p.take_consumed_chunk_bytes(), 0);
+    }
+
+    /// A chunk larger than the caller's buffer keeps draining across
+    /// `try_next` calls without waiting for more USB data (live-verified
+    /// behaviour: a 10292-byte dump chunk vs a 4096-byte buffer).
+    #[test]
+    fn stranded_stream_drains_across_calls() {
+        let dc = encode_atom_do_transition_cut(0); // 12 B
+        let mut chunk: Vec<u8> = Vec::new();
+        chunk.extend_from_slice(&dc);
+        chunk.extend_from_slice(&dc);
+        chunk.extend_from_slice(&dc);
+        chunk.extend_from_slice(&[0x00u8, 0x20, 0x00, 0x00]); // partial record head
+        let mut p = StreamParser::new(DataLenLayout::LeAtStart, 4096);
+        p.push(&data_le(chunk.len() as u16));
+        p.push(&chunk);
+
+        // Buffer smaller than the stream: first call delivers what fits.
+        let mut out = [0u8; 32];
+        assert_eq!(p.try_next(&mut out).unwrap(), Some(ParsedDeviceFrame::Data { atoms_len: 24 }));
+        assert_eq!(p.carried_stream_bytes(), 16);
+
+        // No new USB data: the remaining complete atoms still drain.
+        assert_eq!(p.try_next(&mut out).unwrap(), Some(ParsedDeviceFrame::Data { atoms_len: 12 }));
+        assert_eq!(p.carried_stream_bytes(), 4);
+        assert_eq!(p.try_next(&mut out).unwrap(), None); // only the partial head left
     }
 }

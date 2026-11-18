@@ -135,6 +135,9 @@ pub struct AtemUsbSession<H: UsbBulkHost> {
     /// Credit re-grant scheduled by the last consumed chunk.
     pending_credit: Option<u16>,
     announced_blocks: u16,
+    /// Set when the backend reports an idle IN stall: the switcher has
+    /// nothing queued, so further credit re-grants are skipped.
+    credit_paused: bool,
 }
 
 /// Internal frame kind without a payload borrow.
@@ -162,6 +165,7 @@ impl<H: UsbBulkHost> AtemUsbSession<H> {
             pending_flow_announce: None,
             pending_credit: None,
             announced_blocks: 0,
+            credit_paused: false,
         }
     }
 
@@ -191,6 +195,7 @@ impl<H: UsbBulkHost> AtemUsbSession<H> {
         self.pending_flow_announce = None;
         self.pending_credit = None;
         self.announced_blocks = 0;
+        self.credit_paused = false;
         self.last_tx_ms = now_ms;
         Ok(())
     }
@@ -204,6 +209,7 @@ impl<H: UsbBulkHost> AtemUsbSession<H> {
         self.pending_flow_announce = None;
         self.pending_credit = None;
         self.announced_blocks = 0;
+        self.credit_paused = false;
     }
 
     /// Drive the session: may emit at most **one** event per call.
@@ -252,6 +258,11 @@ impl<H: UsbBulkHost> AtemUsbSession<H> {
             let n =
                 self.host.read_bulk(&mut self.scratch).await.map_err(UsbSessionError::Backend)?;
             if n == 0 {
+                if self.host.took_idle_stall() {
+                    // The switcher is idle (live-verified stall semantics):
+                    // stop re-granting credit until the session is reset.
+                    self.credit_paused = true;
+                }
                 return Ok(None); // device ZLP: not a frame
             }
             self.parser.push(&self.scratch[..n]);
@@ -332,9 +343,11 @@ impl<H: UsbBulkHost> AtemUsbSession<H> {
     fn take_ready_frame(&mut self, buf: &mut [u8]) -> Result<Option<ReadyFrame>, FrameError> {
         let parsed = self.parser.try_next(buf)?;
         // Any consumed chunk (even one that completed no atom) earns the
-        // switcher fresh receive credit so the dump keeps flowing.
+        // switcher fresh receive credit so the dump keeps flowing — unless the
+        // switcher already signalled idle, in which case further grants are
+        // pointless (and stall-prone).
         let consumed = self.parser.take_consumed_chunk_bytes();
-        if consumed > 0 {
+        if consumed > 0 && !self.credit_paused {
             self.pending_credit = self.config.auto_credit_blocks;
         }
         match parsed {
@@ -395,6 +408,8 @@ mod tests {
         inbound: VecDeque<Vec<u8>>,
         outbound: Vec<Vec<u8>>,
         delays: Vec<u32>,
+        /// Whether the next `took_idle_stall` should report a stall.
+        stall_flag: bool,
     }
 
     impl MockBulk {
@@ -405,9 +420,12 @@ mod tests {
             }
         }
     }
-
     impl UsbBulkHost for MockBulk {
         type Error = MockErr;
+
+        fn took_idle_stall(&mut self) -> bool {
+            core::mem::take(&mut self.stall_flag)
+        }
 
         async fn read_bulk(&mut self, buf: &mut [u8]) -> Result<usize, Self::Error> {
             match self.inbound.pop_front() {
@@ -440,6 +458,53 @@ mod tests {
         let ev = s.poll(*now, buf).await.unwrap();
         assert_eq!(ev, Some(SessionEvent::InitAck));
         assert_eq!(s.state(), UsbSessionState::Acked);
+    }
+
+    #[tokio::test]
+    async fn idle_stall_pauses_credit() {
+        // After the switcher signals idle (IN stall), further credit grants
+        // are suppressed — matching the live capture where the pointless
+        // grant after the final chunk served no purpose.
+        let ack = [0x02u8, 0x00, 0x01, 0x00];
+        let dc = bmd_atem_atom::encode_atom_do_transition_cut(0);
+        let hdr = |len: u16| {
+            let [l, h] = len.to_le_bytes();
+            vec![0x04, 0x00, 0x01, 0x00, l, h, 0, 0, 0, 0, 0, 0]
+        };
+        let mut session = AtemUsbSession::new(
+            MockBulk::new(vec![
+                ack.to_vec(),
+                hdr(12).into_iter().chain(dc.iter().copied()).collect(),
+            ]),
+            UsbSessionConfig::default(),
+        );
+        let mut now = 0u32;
+        let mut rxb = [0u8; 64];
+        finish_handshake(&mut session, &mut now, &mut rxb).await;
+        now += 1;
+
+        // Chunk consumed → credit scheduled; the idle stall is flagged on the
+        // same poll (chunk read returns data, then the poll's next read hits
+        // the empty queue). Simulate by flagging the stall manually.
+        let ev = session.poll(now, &mut rxb).await.unwrap();
+        assert_eq!(ev, Some(SessionEvent::Atoms { block: dc.as_slice(), first: true }));
+        session.host.stall_flag = true;
+
+        // The stalled poll pauses credit: the auto-grant scheduled by the
+        // chunk was already flushed (it precedes the stall detection), but no
+        // *further* grants follow.
+        now += 1;
+        let ev = session.poll(now, &mut rxb).await.unwrap();
+        assert_eq!(ev, None);
+        assert_eq!(session.host.outbound.len(), 3); // init + grant + final auto-grant
+        assert_eq!(session.host.outbound[2], build_flow_host(4));
+        assert!(session.credit_paused);
+
+        // Nothing new: no more grants.
+        now += 1;
+        let ev = session.poll(now, &mut rxb).await.unwrap();
+        assert_eq!(ev, None);
+        assert_eq!(session.host.outbound.len(), 3);
     }
 
     #[tokio::test]

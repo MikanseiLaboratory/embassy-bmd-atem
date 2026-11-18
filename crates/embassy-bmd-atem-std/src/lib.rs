@@ -72,6 +72,9 @@ pub struct NusbBulkHost {
     /// Optional capture sink: every bulk transfer is appended as one hex line
     /// (`>` host→device, `<` device→host) for protocol analysis.
     raw_log: Option<std::fs::File>,
+    /// Set when the last read was an IN-endpoint stall; consumed by
+    /// [`UsbBulkHost::took_idle_stall`].
+    stall_flag: bool,
 }
 
 impl NusbBulkHost {
@@ -161,7 +164,13 @@ pub async fn open_device(
     let interface_handle = claim_interface(&device, iface).await?;
     let ep_out = interface_handle.endpoint::<Bulk, Out>(out_addr).map_err(HostError::Nusb)?;
     let ep_in = interface_handle.endpoint::<Bulk, In>(in_addr).map_err(HostError::Nusb)?;
-    Ok(NusbBulkHost { ep_in, ep_out, _interface: interface_handle, raw_log: None })
+    Ok(NusbBulkHost {
+        ep_in,
+        ep_out,
+        _interface: interface_handle,
+        raw_log: None,
+        stall_flag: false,
+    })
 }
 
 /// Claim an interface. On Linux a kernel driver may hold it (usbfs); detach
@@ -251,6 +260,7 @@ impl UsbBulkHost for NusbBulkHost {
             // Device signalled a protocol violation; clear the halt and report
             // an empty read so the session can attempt recovery.
             self.ep_in.clear_halt().await.map_err(HostError::Nusb)?;
+            self.stall_flag = true;
             eprintln!("[usb] bulk IN stalled (cleared halt)");
             return Ok(0);
         }
@@ -285,6 +295,10 @@ impl UsbBulkHost for NusbBulkHost {
 
     async fn delay_ms(&mut self, ms: u32) {
         tokio::time::sleep(Duration::from_millis(u64::from(ms))).await;
+    }
+
+    fn took_idle_stall(&mut self) -> bool {
+        core::mem::take(&mut self.stall_flag)
     }
 }
 

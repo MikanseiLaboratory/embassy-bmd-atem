@@ -126,6 +126,10 @@ struct Cli {
     /// probing for the undocumented `0x05` packet).
     #[arg(long, value_name = "MS")]
     poll_05_ms: Option<u32>,
+    /// Receive credit in 1024 B blocks granted to the switcher (initial grant
+    /// and per-chunk re-grant). Default 4 (live-verified).
+    #[arg(long, default_value_t = 4, value_name = "N")]
+    credit: u16,
 }
 
 fn main() {
@@ -220,11 +224,12 @@ async fn run_live_async(
     let (out_ep, in_ep) = host.endpoints();
     println!("control link ready (iface claimed, bulk OUT 0x{out_ep:02x} / IN 0x{in_ep:02x})");
 
+    let credit = if cli.no_flow || cli.no_credit { None } else { Some(cli.credit) };
     let config = UsbSessionConfig {
         data_len_layout: layout,
         max_atoms_len: max_atoms_len.min(u16::MAX as usize & 0xFFFF) as u16,
-        initial_flow_blocks: if cli.no_flow { None } else { Some(4) },
-        auto_credit_blocks: if cli.no_credit { None } else { Some(4) },
+        initial_flow_blocks: if cli.no_flow { None } else { credit },
+        auto_credit_blocks: if cli.no_credit { None } else { credit },
         keepalive_ms: cli.keepalive_ms.unwrap_or(u32::MAX),
         ..UsbSessionConfig::default()
     };
@@ -244,7 +249,8 @@ async fn run_live_async(
     }
 
     let mut printer = EventPrinter::new(cli.dump.clone(), cli.verbose);
-    let mut buf = vec![0u8; 4096];
+    // Large enough for a whole dump chunk (live: 0x2834) plus carried atoms.
+    let mut buf = vec![0u8; 0x1_0000];
     let ctrl_c = tokio::signal::ctrl_c();
     tokio::pin!(ctrl_c);
 
@@ -253,8 +259,11 @@ async fn run_live_async(
     while session.state() != UsbSessionState::Running {
         tokio::select! {
             r = session.poll(now(), &mut buf) => {
-                if !handle_poll(r, &mut printer)? {
-                    // Nothing complete; keep waiting for the settle deadline.
+                if let Err(e) = handle_poll(r, &mut printer) {
+                    println!("poll error ({e}) — continuing");
+                }
+                if session.state() == UsbSessionState::New {
+                    break;
                 }
             }
             _ = tokio::time::sleep(settle.saturating_duration_since(Instant::now())) => {}
@@ -301,15 +310,18 @@ async fn run_live_async(
         };
         tokio::select! {
             r = session.poll(now(), &mut buf) => {
-                handle_poll(r, &mut printer)?;
+                // Long listens survive transient errors (IN stalls are already
+                // absorbed by the backend; log anything else and keep going).
+                if let Err(e) = handle_poll(r, &mut printer) {
+                    println!("poll error ({e}) — continuing");
+                }
             }
             _ = timer => break,
             _ = tokio::time::sleep_until(tokio::time::Instant::from_std(next_poll_05)), if cli.poll_05_ms.is_some() => {
-                session
-                    .write_raw(&[0x00, 0x05, 0x00, 0x01], now())
-                    .await
-                    .map_err(|e| format!("poll 0x05: {e}"))?;
-                println!("poll: sent 0x05");
+                match session.write_raw(&[0x00, 0x05, 0x00, 0x01], now()).await {
+                    Ok(()) => println!("poll: sent 0x05"),
+                    Err(e) => println!("poll: 0x05 write failed ({e}) — cleared, continuing"),
+                }
                 next_poll_05 += Duration::from_millis(u64::from(cli.poll_05_ms.unwrap_or(1000)));
             }
             _ = &mut ctrl_c => { println!("interrupted"); break; }

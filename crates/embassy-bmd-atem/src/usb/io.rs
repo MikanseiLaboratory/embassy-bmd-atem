@@ -26,4 +26,12 @@ pub trait UsbBulkHost: core::fmt::Debug {
     /// Wait for `ms` milliseconds. Used for send pacing (pyatem waits ~4 ms
     /// per USB write) and keepalive scheduling.
     async fn delay_ms(&mut self, ms: u32);
+
+    /// Whether the most recent [`read_bulk`](Self::read_bulk) returned empty
+    /// because the device **stalled** the IN endpoint (an idle signal) rather
+    /// than a normal zero-length packet. Consumed by the session to pause
+    /// receive-credit re-grants. Defaults to `false`.
+    fn took_idle_stall(&mut self) -> bool {
+        false
+    }
 }

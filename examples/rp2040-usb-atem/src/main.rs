@@ -265,6 +265,9 @@ struct CottonBulk<'a, HC: HostController> {
     bus: &'a UsbBus<HC>,
     bulk_in: BulkIn,
     bulk_out: BulkOut,
+    /// Set when the last read was an IN-endpoint stall; consumed by
+    /// [`UsbBulkHost::took_idle_stall`].
+    stall_flag: bool,
 }
 
 impl<HC: HostController> core::fmt::Debug for CottonBulk<'_, HC> {
@@ -293,6 +296,10 @@ impl core::fmt::Display for CottonErr {
 impl<HC: HostController> UsbBulkHost for CottonBulk<'_, HC> {
     type Error = CottonErr;
 
+    fn took_idle_stall(&mut self) -> bool {
+        core::mem::take(&mut self.stall_flag)
+    }
+
     async fn read_bulk(&mut self, buf: &mut [u8]) -> Result<usize, Self::Error> {
         match self.bus.bulk_in_transfer(&self.bulk_in, buf, TransferType::VariableSize).await {
             Ok(n) => Ok(n),
@@ -302,6 +309,7 @@ impl<HC: HostController> UsbBulkHost for CottonBulk<'_, HC> {
                 // halt and report an empty read; the session keeps running.
                 if self.bus.clear_halt(&self.bulk_in).await.is_ok() {
                     defmt::debug!("bulk IN idle-stall (halt cleared)");
+                    self.stall_flag = true;
                     Ok(0)
                 } else {
                     Err(CottonErr(UsbError::Stall))
@@ -350,7 +358,7 @@ async fn run_atem_session<HC: HostController>(
         ConstStaticCell::new([0u8; MAX_ATOMS_LEN]);
     let buf = RX_BUF.take();
 
-    let backend = CottonBulk { bus: stack, bulk_in, bulk_out };
+    let backend = CottonBulk { bus: stack, bulk_in, bulk_out, stall_flag: false };
     let mut session = AtemUsbSession::new(
         backend,
         UsbSessionConfig { read_chunk: 256, ..UsbSessionConfig::default() },
