@@ -1,0 +1,31 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/bmd-atem-atom",
+    "crates/embassy-bmd-atem",
+    "crates/embassy-bmd-atem-std",
+    "examples/rp2040-usb-atem",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+repository = "https://github.com/MikanseiLaboratory/embassy-bmd-atem"
+
+[workspace.dependencies]
+bmd-atem-atom = { path = "crates/bmd-atem-atom", version = "0.1.0" }
+embassy-bmd-atem = { path = "crates/embassy-bmd-atem", version = "0.1.0" }
+embedded-io-async = { version = "0.7", default-features = false }
+defmt = { version = "1", default-features = false }
+nusb = { version = "0.2.9", features = ["tokio"] }
+tokio = { version = "1.47", default-features = false }
+clap = { version = "4.5", features = ["derive"] }
+
+[workspace.lints.rust]
+# `deny` instead of `forbid` so the firmware example can opt out where
+# an allocator init (or chip peripheral access) requires raw pointers.
+unsafe_code = "deny"
+
+[workspace.lints.clippy]
+module_name_repetitions = "allow"

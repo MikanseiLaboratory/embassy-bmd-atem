@@ -1,0 +1,59 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: Test / Lint
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+          targets: thumbv6m-none-eabi
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Run clippy
+        run: cargo clippy --workspace --all-targets --features embassy-bmd-atem/std -- -D warnings
+
+      - name: no_std check (MCU targets)
+        run: |
+          cargo check -p bmd-atem-atom --target thumbv6m-none-eabi
+          cargo check -p embassy-bmd-atem --target thumbv6m-none-eabi
+
+      - name: Build RP2040 example
+        run: cargo build -p rp2040-usb-atem --target thumbv6m-none-eabi --features firmware
+
+      - name: Run tests
+        run: cargo test -p bmd-atem-atom -p embassy-bmd-atem -p embassy-bmd-atem-std --features embassy-bmd-atem/std
+
+      - name: Build examples
+        run: |
+          cargo build -p embassy-bmd-atem --features std --examples
+          cargo build -p embassy-bmd-atem-std

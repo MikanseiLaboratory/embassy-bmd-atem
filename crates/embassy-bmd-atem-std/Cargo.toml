@@ -1,0 +1,23 @@
+[package]
+name = "embassy-bmd-atem-std"
+description = "Standard-library (Tokio + nusb) host backend and `atem-usb-control` CLI for the Blackmagic Design ATEM USB-C 8.6+ control link"
+keywords = ["atem", "blackmagic", "broadcast", "nusb", "cli"]
+categories = ["hardware-support", "command-line-utilities"]
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+embassy-bmd-atem = { workspace = true }
+bmd-atem-atom = { workspace = true }
+nusb = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "signal", "sync", "time"] }
+clap = { workspace = true }
+
+[[bin]]
+name = "atem-usb-control"
+path = "src/bin/atem-usb-control.rs"
+
+[lints]
+workspace = true
