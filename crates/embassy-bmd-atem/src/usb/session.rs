@@ -29,8 +29,12 @@ pub struct UsbSessionConfig {
     /// (pyatem waits 4 ms around every USB send).
     pub send_pace_ms: u32,
     /// Idle interval for host-initiated zero-length keepalive packets, in ms.
-    /// **Off by default**: bare ZLP writes stall the OUT endpoint on real
-    /// hardware (live-verified 2026-11). Set to a small value only for probing.
+    ///
+    /// Live-verified against `pyatem` on Linux/usbmon: the reference client
+    /// writes a ZLP roughly every 510 ms while idle and never stalls, so the
+    /// keepalive is **on** by default at the same cadence. (A zero-length
+    /// write is rejected by WinUSB through `nusb`, so Windows backends may need
+    /// to raise this or use a 1-byte payload.)
     pub keepalive_ms: u32,
     /// Upper bound of a device-announced chunk, in bytes. Larger announcements
     /// are a protocol error and resynchronise the stream.
@@ -53,7 +57,7 @@ impl Default for UsbSessionConfig {
     fn default() -> Self {
         Self {
             send_pace_ms: 4,
-            keepalive_ms: u32::MAX,
+            keepalive_ms: 510,
             max_atoms_len: 0x4000,
             read_chunk: 2048,
             initial_flow_blocks: Some(4),

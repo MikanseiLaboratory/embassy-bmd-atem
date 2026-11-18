@@ -239,7 +239,7 @@ async fn run_live_async(
         max_atoms_len: max_atoms_len.min(u16::MAX as usize & 0xFFFF) as u16,
         initial_flow_blocks: if cli.no_flow { None } else { credit },
         auto_credit_blocks: if cli.no_credit { None } else { credit },
-        keepalive_ms: cli.keepalive_ms.unwrap_or(u32::MAX),
+        keepalive_ms: cli.keepalive_ms.unwrap_or(UsbSessionConfig::default().keepalive_ms),
         ..UsbSessionConfig::default()
     };
     let mut session = AtemUsbSession::new(host, config);
