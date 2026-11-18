@@ -164,19 +164,20 @@ pub async fn open_device(
     Ok(NusbBulkHost { ep_in, ep_out, _interface: interface_handle, raw_log: None })
 }
 
-/// Claim an interface, detaching a kernel driver on Linux when necessary.
+/// Claim an interface. On Linux a kernel driver may hold it (usbfs); detach
+/// and retry once in that case.
 async fn claim_interface(device: &nusb::Device, iface: u8) -> Result<nusb::Interface, HostError> {
-    match device.claim_interface(iface).await {
-        Ok(handle) => Ok(handle),
-        Err(e) => {
-            #[cfg(target_os = "linux")]
-            match device.detach_and_claim_interface(iface).await {
-                Ok(handle) => Ok(handle),
-                Err(e) => Err(HostError::Nusb(e)),
-            }
-            #[cfg(not(target_os = "linux"))]
-            Err(HostError::Nusb(e))
-        }
+    if let Ok(handle) = device.claim_interface(iface).await {
+        return Ok(handle);
+    }
+    #[cfg(target_os = "linux")]
+    {
+        device.detach_and_claim_interface(iface).await.map_err(HostError::Nusb)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        // Re-run the claim to surface its original error.
+        device.claim_interface(iface).await.map_err(HostError::Nusb)
     }
 }
 
