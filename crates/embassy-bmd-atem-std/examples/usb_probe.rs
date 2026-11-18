@@ -30,8 +30,7 @@ fn main() {
     for info in devices.filter(|d| cli.all || d.vendor_id() == 0x1EDB) {
         found += 1;
         println!(
-            "device {:?} vid=0x{:04x} pid=0x{:04x} addr={} class={:?} serial={:?}",
-            info.instance_id(),
+            "device vid=0x{:04x} pid=0x{:04x} addr={} class={:?} serial={:?}",
             info.vendor_id(),
             info.product_id(),
             info.device_address(),
